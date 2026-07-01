@@ -6,6 +6,7 @@ using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
+using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Navigation;
 
@@ -24,6 +25,7 @@ internal sealed class FileManagerWindow : Window
 
     private readonly IApplication _app;
     private readonly NavigationController _controller;
+    private readonly IFavoritesService _favoritesService;
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -32,10 +34,11 @@ internal sealed class FileManagerWindow : Window
     // don't rebuild the list and reset the selection back to the top.
     private IReadOnlyList<FileSystemEntry>? _renderedEntries;
 
-    public FileManagerWindow(IApplication app, NavigationController controller, string startDirectory)
+    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, string startDirectory)
     {
         _app = app;
         _controller = controller;
+        _favoritesService = favoritesService;
 
         BorderStyle = LineStyle.Rounded;
 
@@ -158,6 +161,10 @@ internal sealed class FileManagerWindow : Window
                 _app.RequestStop();
                 return true;
 
+            case KeyCode.F when alt:
+                AddCurrentDirectoryToFavorites();
+                return true;
+
             case KeyCode.P:
                 CopySelectedPathToClipboard();
                 return true;
@@ -197,6 +204,18 @@ internal sealed class FileManagerWindow : Window
         _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.FullPath)
             ? $"Copied path: {entry.FullPath}"
             : "Clipboard is not available.");
+    }
+
+    private void AddCurrentDirectoryToFavorites()
+    {
+        var directory = _controller.CurrentDirectory;
+
+        // Fire-and-forget: keep the UI responsive; status is updated when the task completes.
+        _ = _favoritesService.AddAsync(directory).ContinueWith(
+            t => _controller.SetStatus(t.Result
+                ? $"Added to favorites: {directory}"
+                : $"Already in favorites: {directory}"),
+            TaskScheduler.FromCurrentSynchronizationContext());
     }
 
     private void Refresh()
@@ -293,7 +312,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+Shift+C copy path   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+Alt+F add favorite   Ctrl+Q quit");
         return builder.ToString();
     }
 }
