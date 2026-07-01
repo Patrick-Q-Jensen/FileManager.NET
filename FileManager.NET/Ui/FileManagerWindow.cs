@@ -18,6 +18,9 @@ namespace FileManager.NET.Ui;
 /// </summary>
 internal sealed class FileManagerWindow : Window
 {
+    // Upper bound for the path portion of the title before its leading segments are elided.
+    private const int MaxPathTitleLength = 48;
+
     private readonly IApplication _app;
     private readonly NavigationController _controller;
     private readonly Label _filterLabel;
@@ -140,13 +143,63 @@ internal sealed class FileManagerWindow : Window
             _listView.EnsureSelectedItemVisible();
         }
 
-        Title = _controller.CurrentDirectory;
+        Title = FormatTitle(_controller.CurrentDirectory);
         _filterLabel.Text = _controller.Query.Length > 0
             ? $" /{_controller.Query}"
             : " / (type to filter)";
         _statusLabel.Text = BuildStatus(entries.Count);
 
         SetNeedsDraw();
+    }
+
+    /// <summary>
+    /// Builds the window/console title so the most relevant part of the path stays visible when
+    /// the tab strip is too narrow to show it in full. The leaf folder is placed first (it is
+    /// never truncated by the terminal's trailing ellipsis), followed by the full path. If the
+    /// full path itself is long, its leading segments are trimmed to a head ellipsis so the
+    /// deepest folders remain readable in natural order.
+    /// </summary>
+    private static string FormatTitle(string directory)
+    {
+        if (string.IsNullOrEmpty(directory))
+        {
+            return "FileManager";
+        }
+
+        var leaf = Path.GetFileName(directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrEmpty(leaf))
+        {
+            // A drive root such as "C:\" has no file name; show it as-is.
+            return directory;
+        }
+
+        var path = ShortenPathHead(directory, MaxPathTitleLength);
+        return $"{leaf} — {path}";
+    }
+
+    /// <summary>
+    /// Trims the leading segments of <paramref name="path"/> to a head ellipsis when it exceeds
+    /// <paramref name="maxLength"/>, keeping the right-most (deepest) portion of the path.
+    /// </summary>
+    private static string ShortenPathHead(string path, int maxLength)
+    {
+        if (path.Length <= maxLength)
+        {
+            return path;
+        }
+
+        const string ellipsis = "…";
+        var keep = maxLength - ellipsis.Length;
+        var tail = path[^keep..];
+
+        // Prefer to start the visible tail at a path separator so segments are not cut mid-name.
+        var separator = tail.IndexOf(Path.DirectorySeparatorChar);
+        if (separator > 0 && separator < tail.Length - 1)
+        {
+            tail = tail[separator..];
+        }
+
+        return ellipsis + tail;
     }
 
     private string BuildStatus(int count)

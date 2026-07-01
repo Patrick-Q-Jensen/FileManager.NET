@@ -20,6 +20,8 @@ namespace FileManager.NET
             IFileLauncher launcher = new WindowsFileLauncher();
             var controller = new NavigationController(directoryService, filter, launcher);
 
+            Console.Title = "FileManager";
+
             // Disposing the application restores the terminal (alternate buffer, cursor),
             // and `using` guarantees that even if Run throws.
             using IApplication app = Application.Create();

@@ -34,22 +34,13 @@ internal sealed class NavigationController
 
     public IReadOnlyList<FileSystemEntry> FilteredEntries => _state.FilteredEntries;
 
-    /// <summary>Loads <paramref name="path"/>, resets the filter, and prepends a ".." entry when a parent exists.</summary>
+    /// <summary>Loads <paramref name="path"/>, resets the filter, and raises <see cref="Changed"/>.</summary>
     public void EnterDirectory(string path)
     {
         var listing = _directoryService.Load(path);
 
-        var entries = new List<FileSystemEntry>(listing.Entries.Count + 1);
-        var parent = Directory.GetParent(path);
-        if (parent is not null)
-        {
-            entries.Add(FileSystemEntry.CreateParent(parent.FullName));
-        }
-
-        entries.AddRange(listing.Entries);
-
         _state.CurrentDirectory = path;
-        _state.AllEntries = entries;
+        _state.AllEntries = listing.Entries.ToList();
         _state.Query = string.Empty;
         _state.StatusMessage = listing.Error;
         ApplyFilter();
