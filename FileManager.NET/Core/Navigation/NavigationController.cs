@@ -115,6 +115,32 @@ internal sealed class NavigationController
         }
     }
 
+    /// <summary>
+    /// Drills into the entry at <paramref name="index"/> when it is a directory. Files are ignored
+    /// so the Right arrow only navigates into folders; use <see cref="Activate"/> (Enter) to launch files.
+    /// </summary>
+    public void DrillInto(int index)
+    {
+        var entry = GetEntry(index);
+        if (entry is { IsDirectory: true })
+        {
+            EnterDirectory(entry.FullPath);
+        }
+    }
+
+    /// <summary>Returns the entry at <paramref name="index"/>, or <c>null</c> when out of range.</summary>
+    public FileSystemEntry? GetEntry(int index) =>
+        index >= 0 && index < _state.FilteredEntries.Count
+            ? _state.FilteredEntries[index]
+            : null;
+
+    /// <summary>Sets the status message shown to the user and notifies observers.</summary>
+    public void SetStatus(string? message)
+    {
+        _state.StatusMessage = message;
+        Changed?.Invoke();
+    }
+
     private void ApplyFilter() =>
         _state.FilteredEntries = _filter.Filter(_state.AllEntries, _state.Query);
 }

@@ -6,6 +6,7 @@ using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
+using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Navigation;
 
 namespace FileManager.NET.Ui;
@@ -26,6 +27,10 @@ internal sealed class FileManagerWindow : Window
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
+
+    // Tracks the entry set currently rendered so status-only refreshes (e.g. after a command)
+    // don't rebuild the list and reset the selection back to the top.
+    private IReadOnlyList<FileSystemEntry>? _renderedEntries;
 
     public FileManagerWindow(IApplication app, NavigationController controller, string startDirectory)
     {
@@ -74,6 +79,18 @@ internal sealed class FileManagerWindow : Window
 
     private void OnEntryKeyDown(object? sender, Key key)
     {
+        // Ctrl-chords are commands, never filter input. Dispatch them first so no command key
+        // ever falls through to navigation or the live filter.
+        if ((key.KeyCode & KeyCode.CtrlMask) != 0)
+        {
+            if (TryHandleCommand(key.KeyCode & ~KeyCode.CtrlMask))
+            {
+                key.Handled = true;
+            }
+
+            return;
+        }
+
         switch (key.KeyCode)
         {
             case KeyCode.CursorUp:
@@ -85,8 +102,12 @@ internal sealed class FileManagerWindow : Window
                 return; // Let the ListView perform native, virtualized navigation.
 
             case KeyCode.Enter:
-            case KeyCode.CursorRight:
                 _controller.Activate(_listView.SelectedItem ?? -1);
+                key.Handled = true;
+                return;
+
+            case KeyCode.CursorRight:
+                _controller.DrillInto(_listView.SelectedItem ?? -1);
                 key.Handled = true;
                 return;
 
@@ -116,37 +137,73 @@ internal sealed class FileManagerWindow : Window
                 key.Handled = true;
                 return;
         }
+    }
 
-        // Ctrl+Q quits. Printable characters are handled by FilterListView for live filtering.
-        if ((key.KeyCode & KeyCode.CtrlMask) != 0
-            && (key.KeyCode & ~KeyCode.CtrlMask) == KeyCode.Q)
+    /// <summary>
+    /// Handles a Ctrl-initiated command identified by <paramref name="commandKey"/> (the pressed
+    /// key with the Ctrl modifier removed). Returns <c>true</c> when the key mapped to a command so
+    /// the caller can mark it handled. New commands are added as cases here.
+    /// </summary>
+    private bool TryHandleCommand(KeyCode commandKey)
+    {
+        switch (commandKey)
         {
-            _app.RequestStop();
-            key.Handled = true;
+            case KeyCode.Q:
+                _app.RequestStop();
+                return true;
+
+            case KeyCode.C:
+                CopySelectedNameToClipboard();
+                return true;
+
+            default:
+                return false;
         }
+    }
+
+    private void CopySelectedNameToClipboard()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null)
+        {
+            _controller.SetStatus("Nothing selected to copy.");
+            return;
+        }
+
+        _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.Name)
+            ? $"Copied name: {entry.Name}"
+            : "Clipboard is not available.");
     }
 
     private void Refresh()
     {
         var entries = _controller.FilteredEntries;
 
-        var rows = new ObservableCollection<string>();
-        for (var i = 0; i < entries.Count; i++)
+        // Only rebuild the list source and reset the selection when the entry set actually
+        // changed (directory change or filter edit). Status-only updates, such as after a
+        // command like Ctrl+C, keep the current selection intact.
+        if (!ReferenceEquals(entries, _renderedEntries))
         {
-            rows.Add(EntryRowFormatter.Format(entries[i]));
-        }
+            var rows = new ObservableCollection<string>();
+            for (var i = 0; i < entries.Count; i++)
+            {
+                rows.Add(EntryRowFormatter.Format(entries[i]));
+            }
 
-        _listView.SetSource(rows);
-        if (entries.Count > 0)
-        {
-            _listView.SelectedItem = 0;
-            _listView.EnsureSelectedItemVisible();
+            _listView.SetSource(rows);
+            if (entries.Count > 0)
+            {
+                _listView.SelectedItem = 0;
+                _listView.EnsureSelectedItemVisible();
+            }
+
+            _renderedEntries = entries;
         }
 
         Title = FormatTitle(_controller.CurrentDirectory);
         _filterLabel.Text = _controller.Query.Length > 0
             ? $" /{_controller.Query}"
-            : " / (type to filter)";
+            : " / ";
         _statusLabel.Text = BuildStatus(entries.Count);
 
         SetNeedsDraw();
@@ -212,7 +269,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  Enter open   \u2190 up   Bksp edit filter   Esc clear/quit   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+Q quit");
         return builder.ToString();
     }
 }
