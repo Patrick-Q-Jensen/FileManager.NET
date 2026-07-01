@@ -81,9 +81,9 @@ internal sealed class FileManagerWindow : Window
     {
         // Ctrl-chords are commands, never filter input. Dispatch them first so no command key
         // ever falls through to navigation or the live filter.
-        if ((key.KeyCode & KeyCode.CtrlMask) != 0)
+        if (key.IsCtrl)
         {
-            if (TryHandleCommand(key.KeyCode & ~KeyCode.CtrlMask))
+            if (TryHandleCommand(key))
             {
                 key.Handled = true;
             }
@@ -140,16 +140,26 @@ internal sealed class FileManagerWindow : Window
     }
 
     /// <summary>
-    /// Handles a Ctrl-initiated command identified by <paramref name="commandKey"/> (the pressed
-    /// key with the Ctrl modifier removed). Returns <c>true</c> when the key mapped to a command so
-    /// the caller can mark it handled. New commands are added as cases here.
+    /// Handles a Ctrl-initiated command from <paramref name="key"/>. Modifier state is read from the
+    /// reliable <see cref="Key.IsShift"/>/<see cref="Key.IsCtrl"/> properties (the Shift bit in
+    /// <see cref="Key.KeyCode"/> is not independently set for alpha keys), and Shift selects between
+    /// command variants (e.g. Ctrl+C copies the name, Ctrl+Shift+C copies the full path). Returns
+    /// <c>true</c> when the key mapped to a command. New commands are added as cases here.
     /// </summary>
-    private bool TryHandleCommand(KeyCode commandKey)
+    private bool TryHandleCommand(Key key)
     {
-        switch (commandKey)
+        
+        bool alt = key.IsAlt;
+        var baseKey = key.KeyCode & ~(KeyCode.CtrlMask | KeyCode.AltMask);
+
+        switch (baseKey)
         {
             case KeyCode.Q:
                 _app.RequestStop();
+                return true;
+
+            case KeyCode.P:
+                CopySelectedPathToClipboard();
                 return true;
 
             case KeyCode.C:
@@ -172,6 +182,20 @@ internal sealed class FileManagerWindow : Window
 
         _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.Name)
             ? $"Copied name: {entry.Name}"
+            : "Clipboard is not available.");
+    }
+
+    private void CopySelectedPathToClipboard()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null)
+        {
+            _controller.SetStatus("Nothing selected to copy.");
+            return;
+        }
+
+        _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.FullPath)
+            ? $"Copied path: {entry.FullPath}"
             : "Clipboard is not available.");
     }
 
@@ -269,7 +293,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+Shift+C copy path   Ctrl+Q quit");
         return builder.ToString();
     }
 }
