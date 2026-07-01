@@ -165,6 +165,10 @@ internal sealed class FileManagerWindow : Window
                 AddCurrentDirectoryToFavorites();
                 return true;
 
+            case KeyCode.F:
+                ShowFavoritesDialog();
+                return true;
+
             case KeyCode.P:
                 CopySelectedPathToClipboard();
                 return true;
@@ -216,6 +220,64 @@ internal sealed class FileManagerWindow : Window
                 ? $"Added to favorites: {directory}"
                 : $"Already in favorites: {directory}"),
             TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    private void ShowFavoritesDialog()
+    {
+        var favorites = _favoritesService.Favorites.ToList();
+
+        if (favorites.Count == 0)
+        {
+            _controller.SetStatus("No favorites saved yet. Use Ctrl+Alt+F to add the current directory.");
+            return;
+        }
+
+        string? chosen = null;
+
+        var listView = new ListView
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(3),
+        };
+        listView.SetSource(new ObservableCollection<string>(favorites));
+
+        var dialog = new Dialog
+        {
+            Title = "Favorites",
+            Width = Dim.Percent(70),
+            Height = Dim.Percent(60),
+        };
+
+        listView.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode == KeyCode.Enter)
+            {
+                chosen = favorites[listView.SelectedItem ?? 0];
+                _app.RequestStop();
+                key.Handled = true;
+            }
+            else if (key.KeyCode == KeyCode.Esc)
+            {
+                _app.RequestStop();
+                key.Handled = true;
+            }
+        };
+
+        dialog.Add(listView);
+        listView.SetFocus();
+
+        _app.Run(dialog);
+
+        if (chosen is not null && Directory.Exists(chosen))
+        {
+            _controller.EnterDirectory(chosen);
+        }
+        else if (chosen is not null)
+        {
+            _controller.SetStatus($"Directory no longer exists: {chosen}");
+        }
     }
 
     private void Refresh()
@@ -312,7 +374,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+Alt+F add favorite   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+Q quit");
         return builder.ToString();
     }
 }
