@@ -262,19 +262,14 @@ internal sealed class FileManagerWindow : Window
             Height = Dim.Percent(60),
         };
 
-        listView.KeyDown += (_, key) =>
+        // Confirm via the ListView's Accept command (raised by Enter). This is the semantic
+        // "user picked the selected item" signal; capturing it here lets Enter work reliably.
+        // Cancel is left to the Dialog's built-in Esc handling, so we add no custom Esc key handler.
+        listView.Accepting += (_, e) =>
         {
-            if (key.KeyCode == KeyCode.Enter)
-            {
-                chosen = drives[listView.SelectedItem ?? 0];
-                _app.RequestStop();
-                key.Handled = true;
-            }
-            else if (key.KeyCode == KeyCode.Esc)
-            {
-                _app.RequestStop();
-                key.Handled = true;
-            }
+            chosen = drives[listView.SelectedItem ?? 0];
+            e.Handled = true;
+            _app.RequestStop();
         };
 
         dialog.Add(listView);
@@ -320,19 +315,14 @@ internal sealed class FileManagerWindow : Window
             Height = Dim.Percent(60),
         };
 
-        listView.KeyDown += (_, key) =>
+        // See ShowDrivesDialog: confirm via the ListView's Accept command; cancel via the Dialog's
+        // built-in Esc handling. No custom Esc handler on the focused view keeps arrow-key
+        // navigation off the escape-sequence timeout path.
+        listView.Accepting += (_, e) =>
         {
-            if (key.KeyCode == KeyCode.Enter)
-            {
-                chosen = favorites[listView.SelectedItem ?? 0];
-                _app.RequestStop();
-                key.Handled = true;
-            }
-            else if (key.KeyCode == KeyCode.Esc)
-            {
-                _app.RequestStop();
-                key.Handled = true;
-            }
+            chosen = favorites[listView.SelectedItem ?? 0];
+            e.Handled = true;
+            _app.RequestStop();
         };
 
         dialog.Add(listView);
@@ -375,19 +365,13 @@ internal sealed class FileManagerWindow : Window
             Height = 7,
         };
 
-        textField.KeyDown += (_, key) =>
+        // See ShowDrivesDialog: confirm via the TextField's Accept command (Enter); cancel via the
+        // Dialog's built-in Esc handling.
+        textField.Accepting += (_, e) =>
         {
-            if (key.KeyCode == KeyCode.Enter)
-            {
-                args = textField.Text ?? string.Empty;
-                _app.RequestStop();
-                key.Handled = true;
-            }
-            else if (key.KeyCode == KeyCode.Esc)
-            {
-                _app.RequestStop();
-                key.Handled = true;
-            }
+            args = textField.Text ?? string.Empty;
+            e.Handled = true;
+            _app.RequestStop();
         };
 
         dialog.Add(textField);

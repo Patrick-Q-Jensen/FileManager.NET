@@ -12,14 +12,14 @@ namespace FileManager.NET
     {
         private static void Main(string[] args)
         {
-            var startDirectory = args.Length > 0 && Directory.Exists(args[0])
+            string startDirectory = args.Length > 0 && Directory.Exists(args[0])
                 ? Path.GetFullPath(args[0])
                 : Environment.CurrentDirectory;
 
             IDirectoryService directoryService = new DirectoryService();
             IEntryFilter filter = new SubstringEntryFilter();
             IFileLauncher launcher = new WindowsFileLauncher();
-            var controller = new NavigationController(directoryService, filter, launcher);
+            NavigationController controller = new NavigationController(directoryService, filter, launcher);
 
             // Start loading favorites from disk in the background so it never delays startup.
             IFavoritesService favorites = new FavoritesService();
@@ -32,7 +32,7 @@ namespace FileManager.NET
             using IApplication app = Application.Create();
             app.Init();
 
-            using var window = new FileManagerWindow(app, controller, favorites, startDirectory);
+            using FileManagerWindow window = new FileManagerWindow(app, controller, favorites, startDirectory);
             app.Run(window);
         }
     }
