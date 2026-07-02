@@ -66,9 +66,8 @@ internal sealed class FileManagerTabs : Window
     }
 
     /// <summary>
-    /// Intercepts tab-management Ctrl chords that bubbled up unhandled from the focused pane.
-    /// Ctrl+T duplicates the current tab (up to <see cref="MaxTabs"/>), Ctrl+Tab cycles to the
-    /// next tab, and Ctrl+1-9 jumps directly to the corresponding tab.
+    /// Fallback handler for tab-management Ctrl chords in case focus lands on the Tabs container
+    /// itself rather than on a pane. Panes handle these directly via injected delegates.
     /// </summary>
     protected override bool OnKeyDown(Key key)
     {
@@ -88,14 +87,6 @@ internal sealed class FileManagerTabs : Window
                     key.Handled = true;
                     return true;
             }
-
-            int tabIndex = GetDigitTabIndex(baseKey);
-            if (tabIndex >= 0)
-            {
-                GoToTab(tabIndex);
-                key.Handled = true;
-                return true;
-            }
         }
 
         return base.OnKeyDown(key);
@@ -113,6 +104,11 @@ internal sealed class FileManagerTabs : Window
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.
         pane.DirectoryChanged += RefreshTabHeaders;
+
+        // Wire tab-management commands so the pane handles them directly without bubbling.
+        pane.SwitchToTab = GoToTab;
+        pane.DuplicateTab = DuplicateCurrentTab;
+        pane.CycleTab = CycleToNextTab;
 
         _tabs.Add(pane);
         _tabs.Value = pane;
@@ -223,21 +219,5 @@ internal sealed class FileManagerTabs : Window
 
         _tabs.Value = tabs[zeroBasedIndex];
         tabs[zeroBasedIndex].SetFocus();
-    }
-
-    /// <summary>
-    /// Returns the zero-based tab index for digit keys 1-9 (Ctrl+1 → 0, Ctrl+9 → 8),
-    /// or -1 when <paramref name="key"/> is not a digit in that range.
-    /// Terminal.Gui v2 maps digit keys to their Unicode/ASCII character values.
-    /// </summary>
-    private static int GetDigitTabIndex(KeyCode key)
-    {
-        int code = (int)key;
-        if (code >= (int)'1' && code <= (int)'9')
-        {
-            return code - (int)'1';
-        }
-
-        return -1;
     }
 }

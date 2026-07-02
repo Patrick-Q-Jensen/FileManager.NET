@@ -50,6 +50,15 @@ internal sealed class FileManagerWindow : Window
     /// </summary>
     internal event Action? DirectoryChanged;
 
+    /// <summary>Set by the host to handle Ctrl+1-9 tab switching from within this pane.</summary>
+    internal Action<int>? SwitchToTab { get; set; }
+
+    /// <summary>Set by the host to handle Ctrl+T duplicate-tab from within this pane.</summary>
+    internal Action? DuplicateTab { get; set; }
+
+    /// <summary>Set by the host to handle Ctrl+Tab next-tab from within this pane.</summary>
+    internal Action? CycleTab { get; set; }
+
     /// <summary>The directory currently displayed in this tab.</summary>
     internal string CurrentDirectory => _controller.CurrentDirectory;
 
@@ -156,6 +165,16 @@ internal sealed class FileManagerWindow : Window
 
                 key.Handled = true;
                 return;
+
+            default:
+                int tabIndex = GetFKeyTabIndex(key.KeyCode);
+                if (tabIndex >= 0)
+                {
+                    SwitchToTab?.Invoke(tabIndex);
+                    key.Handled = true;
+                }
+
+                return;
         }
     }
 
@@ -202,9 +221,34 @@ internal sealed class FileManagerWindow : Window
                 ShowDrivesDialog();
                 return true;
 
+            case KeyCode.T:
+                DuplicateTab?.Invoke();
+                return true;
+
+            case KeyCode.Tab:
+                CycleTab?.Invoke();
+                return true;
+
             default:
                 return false;
         }
+    }
+
+    private static int GetFKeyTabIndex(KeyCode key)
+    {
+        return key switch
+        {
+            KeyCode.F1 => 0,
+            KeyCode.F2 => 1,
+            KeyCode.F3 => 2,
+            KeyCode.F4 => 3,
+            KeyCode.F5 => 4,
+            KeyCode.F6 => 5,
+            KeyCode.F7 => 6,
+            KeyCode.F8 => 7,
+            KeyCode.F9 => 8,
+            _ => -1,
+        };
     }
 
     private void CopySelectedNameToClipboard()
