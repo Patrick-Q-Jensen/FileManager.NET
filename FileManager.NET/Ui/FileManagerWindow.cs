@@ -35,13 +35,25 @@ internal sealed class FileManagerWindow : Window
     // don't rebuild the list and reset the selection back to the top.
     private IReadOnlyList<FileSystemEntry>? _renderedEntries;
 
+    // Tracks the directory the tab header was last drawn for. When it changes (drill-down or
+    // move to parent) DirectoryChanged is raised so the host can refresh the tab strip.
+    private string? _renderedDirectory;
+
+    /// <summary>
+    /// Raised when this tab has navigated to a different directory (and therefore its tab header
+    /// title changed). The host uses this to refresh the whole tab strip so headers reflow without
+    /// overlapping. Not raised for filter edits or status-only updates.
+    /// </summary>
+    internal event Action? DirectoryChanged;
+
+    /// <summary>The directory currently displayed in this tab.</summary>
+    internal string CurrentDirectory => _controller.CurrentDirectory;
+
     public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, string startDirectory)
     {
         _app = app;
         _controller = controller;
         _favoritesService = favoritesService;
-
-        BorderStyle = LineStyle.Rounded;
 
         _filterLabel = new Label
         {
@@ -433,6 +445,19 @@ internal sealed class FileManagerWindow : Window
         _statusLabel.Text = BuildStatus(entries.Count);
 
         SetNeedsDraw();
+
+        // The tab header is not painted from this window's Title directly: in tab mode the Border
+        // adornment hosts a TitleView whose text and measured length are only refreshed inside its
+        // layout pass. Reassigning Title only marks this window for redraw, so the header keeps the
+        // old directory until its border layout is invalidated. That reflow must also account for
+        // the OTHER tabs (their cached header widths) to avoid overlapping headers, so it is the
+        // host's responsibility. Notify it only on an actual directory change; filter/status-only
+        // refreshes are skipped.
+        if (!string.Equals(_renderedDirectory, _controller.CurrentDirectory, StringComparison.Ordinal))
+        {
+            _renderedDirectory = _controller.CurrentDirectory;
+            DirectoryChanged?.Invoke();
+        }
     }
 
     /// <summary>
@@ -495,7 +520,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
         return builder.ToString();
     }
 }

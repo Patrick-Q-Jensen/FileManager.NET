@@ -29,6 +29,31 @@ internal sealed class FilterListView : ListView
         return base.OnKeyDown(key);
     }
 
+    /// <summary>
+    /// Runs only after the ListView's own key bindings have had their chance (this is raised by the
+    /// framework when a key was NOT consumed by any command on this view). When the selection is
+    /// already at the first/last item, the ListView leaves the arrow/page key unhandled, and it
+    /// would then bubble up to the hosting Tabs container whose arrow bindings move the tab
+    /// selection. Marking the list-navigation keys handled here stops that bubble without
+    /// interfering with normal in-list movement (which is handled earlier, before this runs).
+    /// </summary>
+    protected override bool OnKeyDownNotHandled(Key key)
+    {
+        switch (key.KeyCode)
+        {
+            case KeyCode.CursorUp:
+            case KeyCode.CursorDown:
+            case KeyCode.PageUp:
+            case KeyCode.PageDown:
+            case KeyCode.Home:
+            case KeyCode.End:
+                key.Handled = true;
+                return true;
+        }
+
+        return base.OnKeyDownNotHandled(key);
+    }
+
     private static bool TryGetPrintable(Key key, out char character)
     {
         character = '\0';
