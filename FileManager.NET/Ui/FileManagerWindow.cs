@@ -182,6 +182,10 @@ internal sealed class FileManagerWindow : Window
                 ShowExecuteDialog();
                 return true;
 
+            case KeyCode.D:
+                ShowDrivesDialog();
+                return true;
+
             default:
                 return false;
         }
@@ -225,6 +229,67 @@ internal sealed class FileManagerWindow : Window
                 ? $"Added to favorites: {directory}"
                 : $"Already in favorites: {directory}"),
             TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    private void ShowDrivesDialog()
+    {
+        var drives = DriveInfo.GetDrives()
+            .Where(d => d.IsReady)
+            .Select(d => d.Name)
+            .ToList();
+
+        if (drives.Count == 0)
+        {
+            _controller.SetStatus("No drives are available.");
+            return;
+        }
+
+        string? chosen = null;
+
+        var listView = new ListView
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(3),
+        };
+        listView.SetSource(new ObservableCollection<string>(drives));
+
+        var dialog = new Dialog
+        {
+            Title = "Drives",
+            Width = Dim.Percent(50),
+            Height = Dim.Percent(60),
+        };
+
+        listView.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode == KeyCode.Enter)
+            {
+                chosen = drives[listView.SelectedItem ?? 0];
+                _app.RequestStop();
+                key.Handled = true;
+            }
+            else if (key.KeyCode == KeyCode.Esc)
+            {
+                _app.RequestStop();
+                key.Handled = true;
+            }
+        };
+
+        dialog.Add(listView);
+        listView.SetFocus();
+
+        _app.Run(dialog);
+
+        if (chosen is not null && Directory.Exists(chosen))
+        {
+            _controller.EnterDirectory(chosen);
+        }
+        else if (chosen is not null)
+        {
+            _controller.SetStatus($"Drive is not accessible: {chosen}");
+        }
     }
 
     private void ShowFavoritesDialog()
@@ -446,7 +511,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+X execute   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit");
         return builder.ToString();
     }
 }
