@@ -117,6 +117,51 @@ internal sealed class FileManagerTabs : Window
         _tabs.Add(pane);
         _tabs.Value = pane;
         pane.SetFocus();
+
+        // Double-defer: the first Invoke lets Tabs complete its initial layout pass (which sets
+        // Frame.Width on the new tab); the second then runs ApplyTabTitleWidths with valid
+        // dimensions. A single defer is not enough because Frame.Width is still 0 on the first
+        // pump cycle after Add().
+        _app.Invoke(() => _app.Invoke(ApplyTabTitleWidths));
+    }
+
+    /// <summary>
+    /// Computes the per-tab header width in cells from the available container width divided by
+    /// the current tab count, sets <see cref="BorderView.TabLength"/> on each tab directly so the
+    /// framework uses an explicit fixed width instead of auto-sizing from the title string, and
+    /// forces a layout/draw pass so headers reflow immediately.
+    /// </summary>
+    private void ApplyTabTitleWidths()
+    {
+        var tabs = _tabs.TabCollection.ToList();
+        var tabCount = Math.Max(1, tabs.Count);
+
+        // Use the root window frame width as the reliable available-width source; _tabs fills it
+        // entirely via Dim.Fill() so this.Frame.Width equals the usable tab bar width.
+        var tabWidth = Math.Max(8, this.Frame.Width / tabCount - 1);
+
+        foreach (var tab in tabs)
+        {
+            // Set TabLength directly so Tabs uses an explicit pixel width rather than
+            // auto-sizing from the title string (which would add border overhead on top).
+            if (tab.Border?.View is BorderView borderView)
+            {
+                borderView.TabLength = tabWidth;
+            }
+
+            // Also reformat the title string to fit within the fixed width (subtract 2 for the
+            // border cells Terminal.Gui adds around the text inside the tab header).
+            if (tab is FileManagerWindow pane)
+            {
+                pane.TabTitleWidth = Math.Max(1, tabWidth - 2);
+                pane.RefreshTitle();
+            }
+        }
+
+        // Reset scroll so tab 1 is never pushed off-screen after a width recalculation.
+        _tabs.ScrollOffset = 0;
+        _tabs.SetNeedsLayout();
+        _app.LayoutAndDraw(false);
     }
 
     private void RefreshTabHeaders()
@@ -131,22 +176,7 @@ internal sealed class FileManagerTabs : Window
         _app.Invoke(() =>
         {
             _headerRefreshQueued = false;
-
-            var ordered = _tabs.TabCollection.ToList();
-
-            // Invalidate tab 1 first so its width is the fresh anchor for all subsequent offset calculations.
-            if (ordered.Count > 0)
-            {
-                ordered[0].Border?.View?.SetNeedsLayout();
-            }
-
-            foreach (var tab in ordered.Skip(1))
-            {
-                tab.Border?.View?.SetNeedsLayout();
-            }
-
-            _tabs.SetNeedsLayout();
-            _app.LayoutAndDraw(false);
+            ApplyTabTitleWidths();
         });
     }
 
