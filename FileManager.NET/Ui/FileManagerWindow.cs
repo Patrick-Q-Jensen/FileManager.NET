@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Text;
 using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
@@ -177,6 +178,10 @@ internal sealed class FileManagerWindow : Window
                 CopySelectedNameToClipboard();
                 return true;
 
+            case KeyCode.X:
+                ShowExecuteDialog();
+                return true;
+
             default:
                 return false;
         }
@@ -280,6 +285,73 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
+    private void ShowExecuteDialog()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null)
+        {
+            _controller.SetStatus("Nothing selected to execute.");
+            return;
+        }
+
+        string? args = null;
+
+        var textField = new TextField
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+        };
+
+        var dialog = new Dialog
+        {
+            Title = $"Execute: {entry.Name}",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+
+        textField.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode == KeyCode.Enter)
+            {
+                args = textField.Text ?? string.Empty;
+                _app.RequestStop();
+                key.Handled = true;
+            }
+            else if (key.KeyCode == KeyCode.Esc)
+            {
+                _app.RequestStop();
+                key.Handled = true;
+            }
+        };
+
+        dialog.Add(textField);
+        textField.SetFocus();
+
+        _app.Run(dialog);
+
+        if (args is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = entry.FullPath,
+                Arguments = args,
+                UseShellExecute = true,
+            });
+
+            _controller.SetStatus($"Launched: {entry.Name}");
+        }
+        catch (Exception ex)
+        {
+            _controller.SetStatus($"Launch failed: {ex.Message}");
+        }
+    }
+
     private void Refresh()
     {
         var entries = _controller.FilteredEntries;
@@ -374,7 +446,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+Q quit");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+X execute   Ctrl+Q quit");
         return builder.ToString();
     }
 }
