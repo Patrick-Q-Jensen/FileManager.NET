@@ -143,6 +143,7 @@ internal sealed class FileManagerTabs : Window
             if (tab.Border?.View is BorderView borderView)
             {
                 borderView.TabLength = tabWidth;
+                borderView.SetNeedsLayout();
             }
 
             // Also reformat the title string to fit within the fixed width (subtract 2 for the

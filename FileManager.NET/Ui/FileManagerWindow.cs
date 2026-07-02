@@ -541,10 +541,9 @@ internal sealed class FileManagerWindow : Window
         }
 
         var path = ShortenPathHead(directory, MaxPathTitleLength);
-        var title = $"{leaf} — {path}";
-        return title.Length >= tabTitleWidth
-            ? title[..tabTitleWidth]
-            : title.PadRight(tabTitleWidth);
+        var title = $"{leaf} - {path}";
+        title = title.Length >= tabTitleWidth ? title[..tabTitleWidth] : title.PadRight(tabTitleWidth);
+        return title;
     }
 
     /// <summary>
