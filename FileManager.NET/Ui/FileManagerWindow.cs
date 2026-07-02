@@ -477,9 +477,27 @@ internal sealed class FileManagerWindow : Window
             }
 
             _listView.SetSource(rows);
+
+            // If we just navigated up, try to re-select the child we came from.
+            var restore = _controller.RestoredSelection;
+            _controller.ConsumeRestoredSelection();
+
+            int selectedIndex = 0;
+            if (restore is not null)
+            {
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    if (string.Equals(entries[i].Name, restore, StringComparison.OrdinalIgnoreCase))
+                    {
+                        selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+
             if (entries.Count > 0)
             {
-                _listView.SelectedItem = 0;
+                _listView.SelectedItem = selectedIndex;
                 _listView.EnsureSelectedItemVisible();
             }
 

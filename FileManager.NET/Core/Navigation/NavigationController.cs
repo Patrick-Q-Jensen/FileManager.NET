@@ -15,6 +15,7 @@ internal sealed class NavigationController
     private readonly IEntryFilter _filter;
     private readonly IFileLauncher _launcher;
     private readonly NavigationState _state = new();
+    private readonly Stack<string> _breadcrumb = new();
 
     public NavigationController(IDirectoryService directoryService, IEntryFilter filter, IFileLauncher launcher)
     {
@@ -34,8 +35,29 @@ internal sealed class NavigationController
 
     public IReadOnlyList<FileSystemEntry> FilteredEntries => _state.FilteredEntries;
 
-    /// <summary>Loads <paramref name="path"/>, resets the filter, and raises <see cref="Changed"/>.</summary>
+    /// <summary>
+    /// The child directory name to re-select after navigating up, or <c>null</c> when there is
+    /// nothing to restore. Consumed and cleared by the view on each refresh.
+    /// </summary>
+    public string? RestoredSelection { get; private set; }
+
+    /// <summary>Clears <see cref="RestoredSelection"/> after the view has consumed it.</summary>
+    public void ConsumeRestoredSelection() => RestoredSelection = null;
+
+    /// <summary>
+    /// Loads <paramref name="path"/>, resets the filter, and raises <see cref="Changed"/>.
+    /// Clears <see cref="RestoredSelection"/> unless called from <see cref="GoToParent"/>.
+    /// Use this overload for all navigation that is NOT a "go up" action (favorites, drives,
+    /// drill-down). For go-up, call <see cref="GoToParent"/> which sets the restored selection
+    /// before calling this method.
+    /// </summary>
     public void EnterDirectory(string path)
+    {
+        RestoredSelection = null;
+        LoadDirectory(path);
+    }
+
+    private void LoadDirectory(string path)
     {
         var listing = _directoryService.Load(path);
 
@@ -53,7 +75,10 @@ internal sealed class NavigationController
         var parent = Directory.GetParent(_state.CurrentDirectory);
         if (parent is not null)
         {
-            EnterDirectory(parent.FullName);
+            // Remember the current directory name so the view can re-select it after moving up.
+            RestoredSelection = Path.GetFileName(_state.CurrentDirectory.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            LoadDirectory(parent.FullName);
         }
     }
 
@@ -106,6 +131,7 @@ internal sealed class NavigationController
         var entry = _state.FilteredEntries[index];
         if (entry.IsDirectory)
         {
+            RestoredSelection = null;
             EnterDirectory(entry.FullPath);
         }
         else
@@ -124,6 +150,7 @@ internal sealed class NavigationController
         var entry = GetEntry(index);
         if (entry is { IsDirectory: true })
         {
+            RestoredSelection = null;
             EnterDirectory(entry.FullPath);
         }
     }
