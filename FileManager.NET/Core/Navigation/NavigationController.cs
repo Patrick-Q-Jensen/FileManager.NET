@@ -57,6 +57,17 @@ internal sealed class NavigationController
         LoadDirectory(path);
     }
 
+    /// <summary>
+    /// Reloads the current directory and re-selects <paramref name="entryName"/> after the
+    /// reload. Mirrors the <see cref="GoToParent"/> pattern of setting
+    /// <see cref="RestoredSelection"/> before calling <see cref="LoadDirectory"/>.
+    /// </summary>
+    public void ReloadSelectingEntry(string entryName)
+    {
+        RestoredSelection = entryName;
+        LoadDirectory(_state.CurrentDirectory);
+    }
+
     private void LoadDirectory(string path)
     {
         var listing = _directoryService.Load(path);

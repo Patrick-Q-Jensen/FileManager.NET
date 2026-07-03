@@ -226,6 +226,10 @@ internal sealed class FileManagerWindow : Window
                 ShowDrivesDialog();
                 return true;
 
+            case KeyCode.R:
+                ShowRenameDialog();
+                return true;
+
             case KeyCode.T:
                 DuplicateTab?.Invoke();
                 return true;
@@ -472,6 +476,86 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
+    private void ShowRenameDialog()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null || entry.Name == "..")
+        {
+            _controller.SetStatus("Nothing selected to rename.");
+            return;
+        }
+
+        string? newName = null;
+
+        var textField = new TextField
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = entry.Name,
+        };
+
+        var dialog = new Dialog
+        {
+            Title = $"Rename: {entry.Name}",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+
+        // Confirm via the TextField's Accept command (Enter); cancel via the Dialog's
+        // built-in Esc handling.
+        textField.Accepting += (_, e) =>
+        {
+            newName = textField.Text ?? string.Empty;
+            e.Handled = true;
+            _app.RequestStop();
+        };
+
+        dialog.Add(textField);
+        textField.SetFocus();
+
+        _app.Run(dialog);
+
+        if (newName is null)
+        {
+            return;
+        }
+
+        newName = newName.Trim();
+
+        if (newName.Length == 0)
+        {
+            _controller.SetStatus("Rename cancelled: name cannot be empty.");
+            return;
+        }
+
+        if (string.Equals(newName, entry.Name, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var newFullPath = Path.Combine(_controller.CurrentDirectory, newName);
+
+        try
+        {
+            if (entry.IsDirectory)
+            {
+                Directory.Move(entry.FullPath, newFullPath);
+            }
+            else
+            {
+                File.Move(entry.FullPath, newFullPath);
+            }
+
+            _controller.ReloadSelectingEntry(newName);
+            _controller.SetStatus($"Renamed: {entry.Name} \u2192 {newName}");
+        }
+        catch (Exception ex)
+        {
+            _controller.SetStatus($"Rename failed: {ex.Message}");
+        }
+    }
+
     private void ShowExecuteDialog()
     {
         var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
@@ -671,7 +755,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+R rename   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
         return builder.ToString();
     }
 }
