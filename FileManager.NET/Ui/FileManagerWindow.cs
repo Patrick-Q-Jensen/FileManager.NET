@@ -354,13 +354,15 @@ internal sealed class FileManagerWindow : Window
             bool isConflict = File.Exists(Path.Combine(_controller.CurrentDirectory, name))
                            || Directory.Exists(Path.Combine(_controller.CurrentDirectory, name));
 
+            bool sourceIsDirectory = Directory.Exists(source);
+
             var dest = isConflict && conflictChoice == ConflictChoice.Duplicate
-                ? GetUniqueDestPath(_controller.CurrentDirectory, name)
+                ? GetUniqueDestPath(_controller.CurrentDirectory, name, sourceIsDirectory)
                 : Path.Combine(_controller.CurrentDirectory, name);
 
             try
             {
-                if (Directory.Exists(source))
+                if (sourceIsDirectory)
                 {
                     if (isConflict && conflictChoice == ConflictChoice.Replace)
                         MergeDirectory(source, dest);
@@ -902,11 +904,21 @@ internal sealed class FileManagerWindow : Window
         return ellipsis + tail;
     }
 
-    private static string GetUniqueDestPath(string destDir, string name)
+    private static string GetUniqueDestPath(string destDir, string name, bool isDirectory)
     {
         var candidate = Path.Combine(destDir, name);
         if (!File.Exists(candidate) && !Directory.Exists(candidate))
             return candidate;
+
+        if (isDirectory)
+        {
+            for (int n = 2; ; n++)
+            {
+                candidate = Path.Combine(destDir, $"{name} ({n})");
+                if (!File.Exists(candidate) && !Directory.Exists(candidate))
+                    return candidate;
+            }
+        }
 
         var ext = Path.GetExtension(name);
         var stem = Path.GetFileNameWithoutExtension(name);
