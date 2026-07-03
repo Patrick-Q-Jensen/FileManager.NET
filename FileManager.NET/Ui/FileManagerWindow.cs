@@ -145,6 +145,11 @@ internal sealed class FileManagerWindow : Window
                 key.Handled = true;
                 return;
 
+            case KeyCode.Delete:
+                ShowDeleteConfirmDialog();
+                key.Handled = true;
+                return;
+
             case KeyCode.Backspace:
                 _controller.Backspace();
                 key.Handled = true;
@@ -397,6 +402,73 @@ internal sealed class FileManagerWindow : Window
         else if (chosen is not null)
         {
             _controller.SetStatus($"Directory no longer exists: {chosen}");
+        }
+    }
+
+    private void ShowDeleteConfirmDialog()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null || entry.Name == "..")
+        {
+            _controller.SetStatus("Nothing selected to delete.");
+            return;
+        }
+
+        bool confirmed = false;
+
+        var label = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = $"Delete \"{entry.Name}\"? Press Enter to confirm.",
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "Confirm Delete",
+            Width = Dim.Percent(60),
+            Height = 6,
+        };
+
+        // Confirm via Enter on the dialog's KeyDown; cancel via the Dialog's built-in
+        // Esc handling.
+        dialog.KeyDown += (_, k) =>
+        {
+            if (k.KeyCode == KeyCode.Enter)
+            {
+                confirmed = true;
+                k.Handled = true;
+                _app.RequestStop();
+            }
+        };
+
+        dialog.Add(label);
+
+        _app.Run(dialog);
+
+        if (!confirmed)
+        {
+            return;
+        }
+
+        try
+        {
+            if (entry.IsDirectory)
+            {
+                Directory.Delete(entry.FullPath, recursive: true);
+            }
+            else
+            {
+                File.Delete(entry.FullPath);
+            }
+
+            _controller.SetStatus($"Deleted: {entry.Name}");
+            _controller.EnterDirectory(_controller.CurrentDirectory);
+        }
+        catch (Exception ex)
+        {
+            _controller.SetStatus($"Delete failed: {ex.Message}");
         }
     }
 
