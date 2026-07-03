@@ -5,7 +5,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <ApplicationIcon>Icons\TUI_Tree_Vector_Clean_v5.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Icons\TUI_Tree_Vector_Clean_v5.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Terminal.Gui" Version="2.4.16" />
