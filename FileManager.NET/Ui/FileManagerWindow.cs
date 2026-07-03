@@ -10,6 +10,7 @@ using Terminal.Gui.Views;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Navigation;
+using FileManager.NET.Platform;
 
 namespace FileManager.NET.Ui;
 
@@ -214,8 +215,16 @@ internal sealed class FileManagerWindow : Window
                 CopySelectedPathToClipboard();
                 return true;
 
-            case KeyCode.C:
+            case KeyCode.N:
                 CopySelectedNameToClipboard();
+                return true;
+
+            case KeyCode.C:
+                CopySelectedItemToClipboard();
+                return true;
+
+            case KeyCode.V:
+                PasteFromClipboard();
                 return true;
 
             case KeyCode.X:
@@ -286,6 +295,154 @@ internal sealed class FileManagerWindow : Window
         _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.FullPath)
             ? $"Copied path: {entry.FullPath}"
             : "Clipboard is not available.");
+    }
+
+    private void CopySelectedItemToClipboard()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null || entry.Name == "..")
+        {
+            _controller.SetStatus("Nothing selected to copy.");
+            return;
+        }
+
+        _controller.SetStatus(WindowsFileClipboard.TrySetFiles([entry.FullPath])
+            ? $"Copied: {entry.Name}"
+            : "Clipboard is not available.");
+    }
+
+    private void PasteFromClipboard()
+    {
+        if (!WindowsFileClipboard.TryGetFiles(out var sources))
+        {
+            _controller.SetStatus("No files on clipboard to paste.");
+            return;
+        }
+
+        // Collect the top-level names that already exist in the destination directory.
+        var conflicts = sources
+            .Select(s =>
+            {
+                var n = Path.GetFileName(s.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                return string.IsNullOrEmpty(n) ? s : n;
+            })
+            .Where(n => File.Exists(Path.Combine(_controller.CurrentDirectory, n))
+                     || Directory.Exists(Path.Combine(_controller.CurrentDirectory, n)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var conflictChoice = ConflictChoice.None;
+        if (conflicts.Count > 0)
+        {
+            conflictChoice = ShowPasteConflictDialog(conflicts);
+            if (conflictChoice == ConflictChoice.None)
+            {
+                _controller.SetStatus("Paste cancelled.");
+                return;
+            }
+        }
+
+        int ok = 0;
+        string? firstError = null;
+
+        foreach (var source in sources)
+        {
+            var name = Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrEmpty(name))
+                name = source;
+
+            bool isConflict = File.Exists(Path.Combine(_controller.CurrentDirectory, name))
+                           || Directory.Exists(Path.Combine(_controller.CurrentDirectory, name));
+
+            var dest = isConflict && conflictChoice == ConflictChoice.Duplicate
+                ? GetUniqueDestPath(_controller.CurrentDirectory, name)
+                : Path.Combine(_controller.CurrentDirectory, name);
+
+            try
+            {
+                if (Directory.Exists(source))
+                {
+                    if (isConflict && conflictChoice == ConflictChoice.Replace)
+                        MergeDirectory(source, dest);
+                    else
+                        CopyDirectory(source, dest);
+                }
+                else
+                {
+                    File.Copy(source, dest, overwrite: isConflict && conflictChoice == ConflictChoice.Replace);
+                }
+
+                ok++;
+            }
+            catch (Exception ex)
+            {
+                firstError ??= $"{name}: {ex.Message}";
+            }
+        }
+
+        _controller.EnterDirectory(_controller.CurrentDirectory);
+
+        int total = sources.Count;
+        _controller.SetStatus(firstError is null
+            ? $"Pasted {ok} {(ok == 1 ? "item" : "items")}."
+            : ok > 0
+                ? $"Pasted {ok}/{total}: {firstError}"
+                : $"Paste failed: {firstError}");
+    }
+
+    private ConflictChoice ShowPasteConflictDialog(IReadOnlyList<string> conflicts)
+    {
+        var choice = ConflictChoice.None;
+
+        var message = conflicts.Count == 1
+            ? $"\"{conflicts[0]}\" already exists in this directory."
+            : $"{conflicts.Count} items already exist in this directory.";
+
+        var messageLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = message,
+        };
+
+        var hintLabel = new Label
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(1),
+            Text = "[R] replace existing   [D] duplicate   Esc cancel",
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "File Conflict",
+            Width = Dim.Percent(65),
+            Height = 7,
+        };
+
+        // Mask out modifier bits and normalize to uppercase so both r/R and d/D are accepted.
+        dialog.KeyDown += (_, k) =>
+        {
+            var ch = char.ToUpperInvariant((char)((uint)k.KeyCode & 0xFFFF));
+            if (ch == 'R')
+            {
+                choice = ConflictChoice.Replace;
+                k.Handled = true;
+                _app.RequestStop();
+            }
+            else if (ch == 'D')
+            {
+                choice = ConflictChoice.Duplicate;
+                k.Handled = true;
+                _app.RequestStop();
+            }
+        };
+
+        dialog.Add(messageLabel, hintLabel);
+        _app.Run(dialog);
+
+        return choice;
     }
 
     private void AddCurrentDirectoryToFavorites()
@@ -745,6 +902,43 @@ internal sealed class FileManagerWindow : Window
         return ellipsis + tail;
     }
 
+    private static string GetUniqueDestPath(string destDir, string name)
+    {
+        var candidate = Path.Combine(destDir, name);
+        if (!File.Exists(candidate) && !Directory.Exists(candidate))
+            return candidate;
+
+        var ext = Path.GetExtension(name);
+        var stem = Path.GetFileNameWithoutExtension(name);
+        for (int n = 2; ; n++)
+        {
+            candidate = Path.Combine(destDir, $"{stem} ({n}){ext}");
+            if (!File.Exists(candidate) && !Directory.Exists(candidate))
+                return candidate;
+        }
+    }
+
+    private static void CopyDirectory(string source, string dest)
+    {
+        Directory.CreateDirectory(dest);
+        foreach (var file in Directory.EnumerateFiles(source))
+            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)));
+        foreach (var dir in Directory.EnumerateDirectories(source))
+            CopyDirectory(dir, Path.Combine(dest, Path.GetFileName(dir)));
+    }
+
+    // Copies the contents of source into an existing dest directory, overwriting conflicting
+    // files. Subdirectories that already exist in dest are merged recursively; new ones are
+    // created. This matches Windows Explorer's folder-conflict behaviour (merge, not replace).
+    private static void MergeDirectory(string source, string dest)
+    {
+        Directory.CreateDirectory(dest); // No-op if dest already exists.
+        foreach (var file in Directory.EnumerateFiles(source))
+            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)), overwrite: true);
+        foreach (var dir in Directory.EnumerateDirectories(source))
+            MergeDirectory(dir, Path.Combine(dest, Path.GetFileName(dir)));
+    }
+
     private string BuildStatus(int count)
     {
         var builder = new StringBuilder();
@@ -755,7 +949,9 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+C copy name   Ctrl+P copy path   Ctrl+R rename   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+N copy name   Ctrl+C copy   Ctrl+V paste   Ctrl+P copy path   Ctrl+R rename   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
         return builder.ToString();
     }
+
+    private enum ConflictChoice { None, Replace, Duplicate }
 }
