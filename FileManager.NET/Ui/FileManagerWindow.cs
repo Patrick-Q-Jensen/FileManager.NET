@@ -247,6 +247,10 @@ internal sealed class FileManagerWindow : Window
                 CycleTab?.Invoke();
                 return true;
 
+            case KeyCode.G:
+                ShowMoveToDialog();
+                return true;
+
             default:
                 return false;
         }
@@ -776,6 +780,82 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
+    private void ShowMoveToDialog()
+    {
+        string? input = null;
+
+        var textField = new TextField
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = _controller.CurrentDirectory,
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "Go To Path",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+
+        // Confirm via the TextField's Accept command (Enter); cancel via the Dialog's
+        // built-in Esc handling.
+        textField.Accepting += (_, e) =>
+        {
+            input = textField.Text ?? string.Empty;
+            e.Handled = true;
+            _app.RequestStop();
+        };
+
+        dialog.Add(textField);
+        textField.SetFocus();
+
+        _app.Run(dialog);
+
+        if (input is null)
+        {
+            return;
+        }
+
+        input = input.Trim();
+
+        if (input.Length == 0)
+        {
+            _controller.SetStatus("Go to cancelled: path cannot be empty.");
+            return;
+        }
+
+        try
+        {
+            var fullPath = Path.IsPathRooted(input)
+                ? input
+                : Path.GetFullPath(input, _controller.CurrentDirectory);
+
+            if (Directory.Exists(fullPath))
+            {
+                _controller.EnterDirectory(fullPath);
+            }
+            else if (File.Exists(fullPath))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = fullPath,
+                    UseShellExecute = true,
+                });
+                _controller.SetStatus($"Opened: {Path.GetFileName(fullPath)}");
+            }
+            else
+            {
+                _controller.SetStatus($"Path not found: {fullPath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _controller.SetStatus($"Go to failed: {ex.Message}");
+        }
+    }
+
     private void Refresh()
     {
         var entries = _controller.FilteredEntries;
@@ -961,7 +1041,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+N copy name   Ctrl+C copy   Ctrl+V paste   Ctrl+P copy path   Ctrl+R rename   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
+        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+N copy name   Ctrl+C copy   Ctrl+V paste   Ctrl+P copy path   Ctrl+R rename   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+G go to   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
         return builder.ToString();
     }
 
