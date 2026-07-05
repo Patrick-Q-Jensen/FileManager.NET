@@ -1,14 +1,17 @@
 namespace FileManager.NET.Core.Favorites;
 
 /// <summary>
-/// Manages the user's list of favorite directories. The list is loaded from disk
-/// asynchronously at startup via <see cref="LoadAsync"/> and persisted automatically
-/// whenever a new favorite is added via <see cref="AddAsync"/>.
+/// Manages the user's ordered list of favorite directories (max <see cref="MaxFavorites"/>
+/// entries). The list is loaded from disk asynchronously at startup via <see cref="BeginLoad"/>
+/// and persisted automatically on every mutation.
 /// </summary>
 internal interface IFavoritesService
 {
-    /// <summary>The current in-memory set of favorite directory paths.</summary>
-    IReadOnlyCollection<string> Favorites { get; }
+    /// <summary>Maximum number of entries the favorites list can hold.</summary>
+    const int MaxFavorites = 9;
+
+    /// <summary>The current in-memory list of favorite directory paths, in insertion order.</summary>
+    IReadOnlyList<string> Favorites { get; }
 
     /// <summary>
     /// Starts loading favorites from disk in the background. Safe to call once at startup;
@@ -22,9 +25,16 @@ internal interface IFavoritesService
     bool Contains(string path);
 
     /// <summary>
-    /// Adds <paramref name="path"/> to the favorites list and persists the updated list to
-    /// disk. Does nothing and returns <see langword="false"/> if <paramref name="path"/> is
-    /// already present.
+    /// Adds <paramref name="path"/> to the favorites list and persists the updated list.
+    /// Returns <see cref="AddFavoriteResult.Added"/> on success,
+    /// <see cref="AddFavoriteResult.AlreadyExists"/> if the path is already present, or
+    /// <see cref="AddFavoriteResult.AtCapacity"/> if <see cref="MaxFavorites"/> is reached.
     /// </summary>
-    Task<bool> AddAsync(string path);
+    Task<AddFavoriteResult> AddAsync(string path);
+
+    /// <summary>
+    /// Removes <paramref name="path"/> from the favorites list and persists the updated list.
+    /// Returns <see langword="true"/> if the path was present and removed.
+    /// </summary>
+    Task<bool> RemoveAsync(string path);
 }

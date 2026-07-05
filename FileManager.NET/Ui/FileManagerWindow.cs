@@ -251,9 +251,74 @@ internal sealed class FileManagerWindow : Window
                 ShowMoveToDialog();
                 return true;
 
+            case KeyCode.I when alt:
+                MoveSelection(-1);
+                return true;
+
+            case KeyCode.K when alt:
+                MoveSelection(1);
+                return true;
+
+            case KeyCode.J when alt:
+                _controller.GoToParent();
+                return true;
+
+            case KeyCode.L when alt:
+                _controller.DrillInto(_listView.SelectedItem ?? -1);
+                return true;
+
             default:
                 return false;
         }
+    }
+
+    private void MoveSelection(int delta)
+    {
+        var count = _renderedEntries?.Count ?? 0;
+        if (count == 0)
+            return;
+
+        var current = _listView.SelectedItem ?? 0;
+        var next = Math.Clamp(current + delta, 0, count - 1);
+
+        if (next == current)
+            return;
+
+        _listView.SelectedItem = next;
+        _listView.EnsureSelectedItemVisible();
+    }
+
+    // Attaches Ctrl+Alt+I (up), Ctrl+Alt+K (down), and optionally Ctrl+Alt+L (confirm) to a
+    // dialog ListView. J is intentionally omitted: going to parent has no meaning in a picker.
+    private static void AttachVimNavigation(ListView listView, int count, Action? onAccept = null)
+    {
+        listView.KeyDown += (_, key) =>
+        {
+            if (!key.IsCtrl || !key.IsAlt)
+                return;
+
+            var baseKey = key.KeyCode & ~(KeyCode.CtrlMask | KeyCode.AltMask);
+
+            if (baseKey == KeyCode.L && onAccept is not null)
+            {
+                onAccept();
+                key.Handled = true;
+                return;
+            }
+
+            int delta = baseKey switch { KeyCode.I => -1, KeyCode.K => 1, _ => 0 };
+            if (delta == 0 || count == 0)
+                return;
+
+            var current = listView.SelectedItem ?? 0;
+            var next = Math.Clamp(current + delta, 0, count - 1);
+            if (next == current)
+                return;
+
+            listView.SelectedItem = next;
+            listView.EnsureSelectedItemVisible();
+            key.Handled = true;
+        };
     }
 
     private static int GetFKeyTabIndex(KeyCode key)
@@ -457,9 +522,13 @@ internal sealed class FileManagerWindow : Window
 
         // Fire-and-forget: keep the UI responsive; status is updated when the task completes.
         _ = _favoritesService.AddAsync(directory).ContinueWith(
-            t => _controller.SetStatus(t.Result
-                ? $"Added to favorites: {directory}"
-                : $"Already in favorites: {directory}"),
+            t => _controller.SetStatus(t.Result switch
+            {
+                AddFavoriteResult.Added         => $"Added to favorites: {directory}",
+                AddFavoriteResult.AlreadyExists => $"Already in favorites: {directory}",
+                AddFavoriteResult.AtCapacity    => $"Favorites list is full ({IFavoritesService.MaxFavorites} max).",
+                _                               => "Could not add favorite.",
+            }),
             TaskScheduler.FromCurrentSynchronizationContext());
     }
 
@@ -494,15 +563,17 @@ internal sealed class FileManagerWindow : Window
             Height = Dim.Percent(60),
         };
 
-        // Confirm via the ListView's Accept command (raised by Enter). This is the semantic
-        // "user picked the selected item" signal; capturing it here lets Enter work reliably.
-        // Cancel is left to the Dialog's built-in Esc handling, so we add no custom Esc key handler.
-        listView.Accepting += (_, e) =>
+        // Confirm via Enter (ListView's Accept command) or Ctrl+Alt+L. Both paths share the same
+        // accept action so the selection logic is never duplicated. Cancel is left to the Dialog's
+        // built-in Esc handling.
+        void acceptDrive()
         {
             chosen = drives[listView.SelectedItem ?? 0];
-            e.Handled = true;
             _app.RequestStop();
-        };
+        }
+
+        listView.Accepting += (_, e) => { acceptDrive(); e.Handled = true; };
+        AttachVimNavigation(listView, drives.Count, acceptDrive);
 
         dialog.Add(listView);
         listView.SetFocus();
@@ -531,31 +602,105 @@ internal sealed class FileManagerWindow : Window
 
         string? chosen = null;
 
-        var listView = new ListView
+        static ObservableCollection<string> BuildRows(List<string> list) =>
+            new(list.Select((f, i) => $"{i + 1}  {f}"));
+
+        var listView = new FilterListView
         {
             X = 1,
             Y = 1,
             Width = Dim.Fill(1),
             Height = Dim.Fill(3),
         };
-        listView.SetSource(new ObservableCollection<string>(favorites));
+        listView.SetSource(BuildRows(favorites));
 
         var dialog = new Dialog
         {
-            Title = "Favorites",
+            Title = "Favorites  (1-9 navigate · Del remove)",
             Width = Dim.Percent(70),
             Height = Dim.Percent(60),
         };
 
-        // See ShowDrivesDialog: confirm via the ListView's Accept command; cancel via the Dialog's
-        // built-in Esc handling. No custom Esc handler on the focused view keeps arrow-key
-        // navigation off the escape-sequence timeout path.
-        listView.Accepting += (_, e) =>
+        // Both Enter (via Accepting) and Ctrl+Alt+L share the same accept action.
+        void acceptFavorite()
         {
-            chosen = favorites[listView.SelectedItem ?? 0];
-            e.Handled = true;
-            _app.RequestStop();
+            var index = listView.SelectedItem ?? 0;
+            if (index >= 0 && index < favorites.Count)
+            {
+                chosen = favorites[index];
+                _app.RequestStop();
+            }
+        }
+
+        // FilterListView routes printable characters here before ListView's type-ahead can move
+        // the selection, so 1-9 immediately enter the corresponding favorite.
+        listView.CharacterTyped += character =>
+        {
+            if (character >= '1' && character <= '9')
+            {
+                var index = character - '1';
+                if (index < favorites.Count)
+                {
+                    chosen = favorites[index];
+                    _app.RequestStop();
+                }
+            }
         };
+
+        listView.KeyDown += (_, key) =>
+        {
+            // Delete: remove the selected favorite and refresh the numbered list.
+            if (key.KeyCode == KeyCode.Delete)
+            {
+                var index = listView.SelectedItem ?? 0;
+                if (index >= 0 && index < favorites.Count)
+                {
+                    var path = favorites[index];
+                    favorites.RemoveAt(index);
+                    _ = _favoritesService.RemoveAsync(path);
+
+                    if (favorites.Count == 0)
+                    {
+                        _app.RequestStop();
+                        return;
+                    }
+
+                    listView.SetSource(BuildRows(favorites));
+                    listView.SelectedItem = Math.Min(index, favorites.Count - 1);
+                    listView.EnsureSelectedItemVisible();
+                    key.Handled = true;
+                }
+                return;
+            }
+
+            // Ctrl+Alt navigation: I=up, K=down, L=accept.
+            if (!key.IsCtrl || !key.IsAlt)
+                return;
+
+            var baseKey = key.KeyCode & ~(KeyCode.CtrlMask | KeyCode.AltMask);
+
+            if (baseKey == KeyCode.L)
+            {
+                acceptFavorite();
+                key.Handled = true;
+                return;
+            }
+
+            int delta = baseKey switch { KeyCode.I => -1, KeyCode.K => 1, _ => 0 };
+            if (delta == 0 || favorites.Count == 0)
+                return;
+
+            var current = listView.SelectedItem ?? 0;
+            var next = Math.Clamp(current + delta, 0, favorites.Count - 1);
+            if (next == current)
+                return;
+
+            listView.SelectedItem = next;
+            listView.EnsureSelectedItemVisible();
+            key.Handled = true;
+        };
+
+        listView.Accepting += (_, e) => { acceptFavorite(); e.Handled = true; };
 
         dialog.Add(listView);
         listView.SetFocus();

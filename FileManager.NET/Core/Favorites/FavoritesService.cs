@@ -4,8 +4,10 @@ namespace FileManager.NET.Core.Favorites;
 
 /// <summary>
 /// Persists favorite directories to <c>%ProgramData%\FileManager.NET\favorites.json</c>.
-/// The file is a plain JSON array of path strings. The in-memory set is protected by a lock
-/// so async load and foreground Add calls are always safe to interleave.
+/// The file is a plain JSON array of path strings. Entries are stored in insertion order and
+/// the list is capped at <see cref="IFavoritesService.MaxFavorites"/> entries. The in-memory
+/// list is protected by a lock so async load and foreground mutations are always safe to
+/// interleave.
 /// </summary>
 internal sealed class FavoritesService : IFavoritesService
 {
@@ -18,8 +20,8 @@ internal sealed class FavoritesService : IFavoritesService
     private static readonly JsonSerializerOptions JsonOptions =
         new() { WriteIndented = true };
 
-    private readonly HashSet<string> _favorites =
-        new(StringComparer.OrdinalIgnoreCase);
+    // List preserves insertion order; uniqueness is enforced manually (n≤9, linear scan is fine).
+    private readonly List<string> _favorites = [];
 
     private readonly SemaphoreSlim _lock = new(1, 1);
 
@@ -27,7 +29,7 @@ internal sealed class FavoritesService : IFavoritesService
     // IFavoritesService
     // -------------------------------------------------------------------------
 
-    public IReadOnlyCollection<string> Favorites
+    public IReadOnlyList<string> Favorites
     {
         get
         {
@@ -44,25 +46,53 @@ internal sealed class FavoritesService : IFavoritesService
     {
         lock (_favorites)
         {
-            return _favorites.Contains(path);
+            return _favorites.Contains(path, StringComparer.OrdinalIgnoreCase);
         }
     }
 
-    public async Task<bool> AddAsync(string path)
+    public async Task<AddFavoriteResult> AddAsync(string path)
     {
         await _lock.WaitAsync().ConfigureAwait(false);
         try
         {
             lock (_favorites)
             {
-                if (!_favorites.Add(path))
-                {
-                    return false;
-                }
+                if (_favorites.Contains(path, StringComparer.OrdinalIgnoreCase))
+                    return AddFavoriteResult.AlreadyExists;
+
+                if (_favorites.Count >= IFavoritesService.MaxFavorites)
+                    return AddFavoriteResult.AtCapacity;
+
+                _favorites.Add(path);
             }
 
             await PersistAsync().ConfigureAwait(false);
-            return true;
+            return AddFavoriteResult.Added;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<bool> RemoveAsync(string path)
+    {
+        await _lock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            bool removed;
+            lock (_favorites)
+            {
+                var index = _favorites.FindIndex(f => string.Equals(f, path, StringComparison.OrdinalIgnoreCase));
+                if (index < 0)
+                    return false;
+
+                _favorites.RemoveAt(index);
+                removed = true;
+            }
+
+            await PersistAsync().ConfigureAwait(false);
+            return removed;
         }
         finally
         {
@@ -95,7 +125,9 @@ internal sealed class FavoritesService : IFavoritesService
             {
                 foreach (var path in paths)
                 {
-                    if (!string.IsNullOrWhiteSpace(path))
+                    if (!string.IsNullOrWhiteSpace(path)
+                        && !_favorites.Contains(path, StringComparer.OrdinalIgnoreCase)
+                        && _favorites.Count < IFavoritesService.MaxFavorites)
                     {
                         _favorites.Add(path);
                     }
@@ -113,7 +145,7 @@ internal sealed class FavoritesService : IFavoritesService
         string[] snapshot;
         lock (_favorites)
         {
-            snapshot = [.. _favorites.OrderBy(p => p, StringComparer.OrdinalIgnoreCase)];
+            snapshot = [.. _favorites];
         }
 
         Directory.CreateDirectory(StorageDirectory);
@@ -127,3 +159,4 @@ internal sealed class FavoritesService : IFavoritesService
         File.Move(tmp, FilePath, overwrite: true);
     }
 }
+
