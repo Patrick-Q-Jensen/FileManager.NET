@@ -100,12 +100,16 @@ internal sealed class FileManagerWindow : Window
         _listView.CharacterTyped += OnCharacterTyped;
         _listView.KeyDown += OnEntryKeyDown;
         _controller.Changed += Refresh;
+        _favoritesService.ErrorOccurred += OnFavoritesError;
 
         _controller.EnterDirectory(startDirectory);
         _listView.SetFocus();
     }
 
     private void OnCharacterTyped(char character) => _controller.AppendToQuery(character);
+
+    private void OnFavoritesError(string message) =>
+        _app.Invoke(() => _controller.SetStatus(message));
 
     private void OnEntryKeyDown(object? sender, Key key)
     {
@@ -533,6 +537,8 @@ internal sealed class FileManagerWindow : Window
                 AddFavoriteResult.AtCapacity    => $"Favorites list is full ({IFavoritesService.MaxFavorites} max).",
                 _                               => "Could not add favorite.",
             }),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnRanToCompletion,
             TaskScheduler.FromCurrentSynchronizationContext());
     }
 
@@ -651,7 +657,7 @@ internal sealed class FileManagerWindow : Window
             }
         };
 
-        listView.KeyDown += (_, key) =>
+        listView.KeyDown += async (_, key) =>
         {
             // Delete: remove the selected favorite and refresh the numbered list.
             if (key.KeyCode == KeyCode.Delete)
@@ -660,18 +666,21 @@ internal sealed class FileManagerWindow : Window
                 if (index >= 0 && index < favorites.Count)
                 {
                     var path = favorites[index];
-                    favorites.RemoveAt(index);
-                    _ = _favoritesService.RemoveAsync(path);
-
-                    if (favorites.Count == 0)
+                    if (await _favoritesService.RemoveAsync(path).ConfigureAwait(true))
                     {
-                        _app.RequestStop();
-                        return;
+                        favorites.RemoveAt(index);
+
+                        if (favorites.Count == 0)
+                        {
+                            _app.RequestStop();
+                            return;
+                        }
+
+                        listView.SetSource(BuildRows(favorites));
+                        listView.SelectedItem = Math.Min(index, favorites.Count - 1);
+                        listView.EnsureSelectedItemVisible();
                     }
 
-                    listView.SetSource(BuildRows(favorites));
-                    listView.SelectedItem = Math.Min(index, favorites.Count - 1);
-                    listView.EnsureSelectedItemVisible();
                     key.Handled = true;
                 }
                 return;

@@ -11,4 +11,7 @@ internal enum AddFavoriteResult
 
     /// <summary>The favorites list is full (<see cref="IFavoritesService.MaxFavorites"/> reached).</summary>
     AtCapacity,
+
+    /// <summary>The path could not be persisted to disk; the in-memory list was not changed.</summary>
+    PersistFailed,
 }

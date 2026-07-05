@@ -10,6 +10,12 @@ internal interface IFavoritesService
     /// <summary>Maximum number of entries the favorites list can hold.</summary>
     const int MaxFavorites = 9;
 
+    /// <summary>
+    /// Raised on any thread when a favorites operation fails. The string argument is a
+    /// human-readable message naming the operation and the error.
+    /// </summary>
+    event Action<string> ErrorOccurred;
+
     /// <summary>The current in-memory list of favorite directory paths, in insertion order.</summary>
     IReadOnlyList<string> Favorites { get; }
 
