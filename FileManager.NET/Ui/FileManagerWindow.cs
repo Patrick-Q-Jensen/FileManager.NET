@@ -267,6 +267,10 @@ internal sealed class FileManagerWindow : Window
                 _controller.DrillInto(_listView.SelectedItem ?? -1);
                 return true;
 
+            case KeyCode.H when alt:
+                ShowHelpDialog();
+                return true;
+
             default:
                 return false;
         }
@@ -1001,6 +1005,71 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
+    private void ShowHelpDialog()
+    {
+        var lines = new ObservableCollection<string>
+        {
+            "  Navigation",
+            "  \u2191 / \u2193           Move selection up / down",
+            "  PgUp / PgDn     Page up / page down",
+            "  Home / End      Jump to first / last",
+            "  \u2192               Drill into directory",
+            "  \u2190               Go to parent directory",
+            "  Enter           Open file or directory",
+            "  Del             Delete selected item",
+            "  Backspace       Edit the active filter",
+            "  Esc             Clear filter  /  quit",
+            "  F1 \u2013 F9         Switch to tab 1 \u2013 9",
+            "  (type)          Filter entries live",
+            "",
+            "  Commands",
+            "  Ctrl+C          Copy selected item to clipboard",
+            "  Ctrl+V          Paste clipboard here",
+            "  Ctrl+N          Copy selected name to clipboard",
+            "  Ctrl+P          Copy selected path to clipboard",
+            "  Ctrl+R          Rename selected item",
+            "  Ctrl+D          Show drive picker",
+            "  Ctrl+F          Show favorites",
+            "  Ctrl+G          Go to path",
+            "  Ctrl+X          Execute with arguments",
+            "  Ctrl+T          Duplicate tab",
+            "  Ctrl+Tab        Cycle to next tab",
+            "  Ctrl+Q          Quit",
+            "  Ctrl+Alt+H      Show this help",
+            "",
+            "  Ctrl+Alt shortcuts",
+            "  Ctrl+Alt+F      Add current directory to favorites",
+            "  Ctrl+Alt+I      Move selection up  (vim-style)",
+            "  Ctrl+Alt+K      Move selection down  (vim-style)",
+            "  Ctrl+Alt+J      Go to parent  (vim-style)",
+            "  Ctrl+Alt+L      Drill into directory  (vim-style)",
+        };
+
+        var listView = new ListView
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(3),
+        };
+        listView.SetSource(lines);
+        AttachVimNavigation(listView, lines.Count, _app.RequestStop);
+
+        var dialog = new Dialog
+        {
+            Title = "Help \u2013 Keyboard Shortcuts",
+            Width = Dim.Percent(70),
+            Height = Dim.Percent(80),
+        };
+
+        listView.Accepting += (_, e) => { e.Handled = true; _app.RequestStop(); };
+
+        dialog.Add(listView);
+        listView.SetFocus();
+
+        _app.Run(dialog);
+    }
+
     private void Refresh()
     {
         var entries = _controller.FilteredEntries;
@@ -1186,7 +1255,7 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  \u2190 up   \u2192 open dir   Enter open   Bksp edit filter   Esc clear/quit   Ctrl+N copy name   Ctrl+C copy   Ctrl+V paste   Ctrl+P copy path   Ctrl+R rename   Ctrl+F favorites   Ctrl+Alt+F add favorite   Ctrl+D drives   Ctrl+G go to   Ctrl+X execute   Ctrl+Q quit   Ctrl+T new tab   Ctrl+Tab next tab   Ctrl+1-9 go to tab");
+        builder.Append("  |  Ctrl+Alt+H help");
         return builder.ToString();
     }
 
