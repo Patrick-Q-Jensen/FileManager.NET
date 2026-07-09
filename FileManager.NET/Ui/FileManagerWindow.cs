@@ -469,6 +469,15 @@ internal sealed class FileManagerWindow : Window
                 : $"Paste failed: {firstError}");
     }
 
+    // Terminal.Gui sets Console.Title to the dialog Title on every Run() call.
+    // Wrap all modal dialog runs through here to keep the title static.
+    private void RunDialog(Dialog dialog)
+    {
+        var savedTitle = Console.Title;
+        _app.Run(dialog);
+        Console.Title = savedTitle;
+    }
+
     private ConflictChoice ShowPasteConflictDialog(IReadOnlyList<string> conflicts)
     {
         var choice = ConflictChoice.None;
@@ -519,7 +528,7 @@ internal sealed class FileManagerWindow : Window
         };
 
         dialog.Add(messageLabel, hintLabel);
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         return choice;
     }
@@ -588,7 +597,7 @@ internal sealed class FileManagerWindow : Window
         dialog.Add(listView);
         listView.SetFocus();
 
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         if (chosen is not null && Directory.Exists(chosen))
         {
@@ -718,7 +727,7 @@ internal sealed class FileManagerWindow : Window
         dialog.Add(listView);
         listView.SetFocus();
 
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         if (chosen is not null && Directory.Exists(chosen))
         {
@@ -770,7 +779,7 @@ internal sealed class FileManagerWindow : Window
 
         dialog.Add(label);
 
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         if (!confirmed)
         {
@@ -835,7 +844,7 @@ internal sealed class FileManagerWindow : Window
         dialog.Add(textField);
         textField.SetFocus();
 
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         if (newName is null)
         {
@@ -914,7 +923,7 @@ internal sealed class FileManagerWindow : Window
         dialog.Add(textField);
         textField.SetFocus();
 
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         if (args is null)
         {
@@ -969,7 +978,7 @@ internal sealed class FileManagerWindow : Window
         dialog.Add(textField);
         textField.SetFocus();
 
-        _app.Run(dialog);
+        RunDialog(dialog);
 
         if (input is null)
         {
@@ -1076,7 +1085,7 @@ internal sealed class FileManagerWindow : Window
         dialog.Add(listView);
         listView.SetFocus();
 
-        _app.Run(dialog);
+        RunDialog(dialog);
     }
 
     private void Refresh()

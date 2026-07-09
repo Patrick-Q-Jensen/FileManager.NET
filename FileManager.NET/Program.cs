@@ -24,7 +24,7 @@ namespace FileManager.NET
             IFavoritesService favorites = new FavoritesService();
             favorites.BeginLoad();
 
-            Console.Title = "FileManager";
+            Console.Title = "File Manager";
 
             // Disposing the application restores the terminal (alternate buffer, cursor),
             // and `using` guarantees that even if Run throws.
