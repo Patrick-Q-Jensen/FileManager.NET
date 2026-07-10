@@ -87,6 +87,7 @@ internal sealed class FileManagerWindow : Window
             Y = 1,
             Width = Dim.Fill(),
             Height = Dim.Fill(1),
+            MarkMultiple = true,
         };
 
         _statusLabel = new Label
@@ -291,9 +292,27 @@ internal sealed class FileManagerWindow : Window
                 ShowHelpDialog();
                 return true;
 
+            // Ctrl+B ("box select") toggles marking mode. Ctrl+M was ruled out because it's
+            // indistinguishable from Enter at the terminal-input level (both send ASCII CR), and
+            // Ctrl+Alt+M was ruled out because some keyboard layouts/drivers report Ctrl+Alt
+            // chords as an AltGr-composed character instead of separate modifier flags.
+            case KeyCode.B:
+                ToggleMarkingMode();
+                return true;
+
             default:
                 return false;
         }
+    }
+
+    // Ctrl+M toggles "marking mode": while enabled, Space checks/unchecks individual entries
+    // (the ListView's built-in mark toggle, shown via ShowMarks) instead of Space falling
+    // through to the live filter as a typed character.
+    private void ToggleMarkingMode()
+    {
+        _listView.ShowMarks = !_listView.ShowMarks;
+        _controller.SetStatus(_listView.ShowMarks ? "Marking mode on (Space to select)" : "Marking mode off");
+        SetNeedsDraw();
     }
 
     private void MoveSelection(int delta)

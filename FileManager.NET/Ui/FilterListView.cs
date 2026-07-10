@@ -54,17 +54,27 @@ internal sealed class FilterListView : ListView
         return base.OnKeyDownNotHandled(key);
     }
 
-    private static bool TryGetPrintable(Key key, out char character)
+    private bool TryGetPrintable(Key key, out char character)
     {
         character = '\0';
 
-        if ((key.KeyCode & (KeyCode.CtrlMask | KeyCode.AltMask)) != 0)
+        // Use the reliable modifier properties rather than the KeyCode bitmask: for some
+        // Ctrl/Alt chords (e.g. Ctrl+Alt+M) the driver reports the composed character with the
+        // modifier bits not reflected in KeyCode, which would otherwise leak into the filter.
+        if (key.IsCtrl || key.IsAlt)
         {
             return false;
         }
 
         var value = key.AsRune.Value;
         if (value < 0x20 || value == 0x7f)
+        {
+            return false;
+        }
+
+        // While marking mode is on, Space is reserved for the native mark/unmark toggle instead
+        // of being appended to the live filter query.
+        if (ShowMarks && value == ' ')
         {
             return false;
         }
