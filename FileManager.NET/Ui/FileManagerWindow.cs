@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
@@ -215,6 +216,10 @@ internal sealed class FileManagerWindow : Window
                 ShowFavoritesDialog();
                 return true;
 
+            case KeyCode.P when alt:
+                ShowPropertiesDialog();
+                return true;
+
             case KeyCode.P:
                 CopySelectedPathToClipboard();
                 return true;
@@ -372,6 +377,28 @@ internal sealed class FileManagerWindow : Window
         _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.FullPath)
             ? $"Copied path: {entry.FullPath}"
             : "Clipboard is not available.");
+    }
+
+    private void ShowPropertiesDialog()
+    {
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        if (entry is null || entry.Name == "..")
+        {
+            _controller.SetStatus("Nothing selected to show properties for.");
+            return;
+        }
+
+        try
+        {
+            if (!NativeMethods.SHObjectProperties(IntPtr.Zero, NativeMethods.SHOP_FILEPATH, entry.FullPath, null))
+            {
+                _controller.SetStatus($"Could not open properties for: {entry.Name}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _controller.SetStatus($"Properties failed: {ex.Message}");
+        }
     }
 
     private void CopySelectedItemToClipboard()
@@ -1061,6 +1088,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+Alt+K      Move selection down  (vim-style)",
             "  Ctrl+Alt+J      Go to parent  (vim-style)",
             "  Ctrl+Alt+L      Drill into directory  (vim-style)",
+            "  Ctrl+Alt+P      Show Windows Properties dialog",
         };
 
         var listView = new ListView
@@ -1280,3 +1308,14 @@ internal sealed class FileManagerWindow : Window
 
     private enum ConflictChoice { None, Replace, Duplicate }
 }
+
+// P/Invoke wrapper for the shell's "Properties" dialog, used by Ctrl+Alt+P. Delegates entirely
+// to Explorer's own shell UI, so no custom dialog needs to be implemented or maintained.
+internal static class NativeMethods
+{
+    internal const uint SHOP_FILEPATH = 0x2;
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern bool SHObjectProperties(IntPtr hwnd, uint shopObjectType, string pszObject, string? pszPage);
+}
+
