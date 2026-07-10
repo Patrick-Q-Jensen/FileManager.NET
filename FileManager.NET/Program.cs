@@ -3,6 +3,7 @@ using Terminal.Gui.App;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
+using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 using FileManager.NET.Ui;
 
@@ -24,6 +25,10 @@ namespace FileManager.NET
             IFavoritesService favorites = new FavoritesService();
             favorites.BeginLoad();
 
+            // Loaded synchronously: the global sort order must be known before the first
+            // directory listing is sorted, and the settings file is tiny.
+            ISortSettingsService sortSettings = new SortSettingsService();
+
             Console.Title = "File Manager";
 
             // Disposing the application restores the terminal (alternate buffer, cursor),
@@ -31,7 +36,7 @@ namespace FileManager.NET
             using IApplication app = Application.Create();
             app.Init();
 
-            using FileManagerTabs tabs = new FileManagerTabs(app, directoryService, filter, launcher, favorites, startDirectory);
+            using FileManagerTabs tabs = new FileManagerTabs(app, directoryService, filter, launcher, favorites, sortSettings, startDirectory);
             app.Run(tabs);
         }
     }

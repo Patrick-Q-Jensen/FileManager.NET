@@ -41,7 +41,8 @@ internal sealed class DirectoryService : IDirectoryService
                     info.Attributes));
             }
 
-            entries.Sort(CompareEntries);
+            // Entries are returned unsorted; NavigationController applies the active SortMode
+            // (local or global) after loading, so ordering is never done twice.
             return new DirectoryListing(entries, null);
         }
         catch (UnauthorizedAccessException)
@@ -56,15 +57,5 @@ internal sealed class DirectoryService : IDirectoryService
         {
             return new DirectoryListing(Array.Empty<FileSystemEntry>(), ex.Message);
         }
-    }
-
-    private static int CompareEntries(FileSystemEntry a, FileSystemEntry b)
-    {
-        if (a.IsDirectory != b.IsDirectory)
-        {
-            return a.IsDirectory ? -1 : 1;
-        }
-
-        return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
     }
 }

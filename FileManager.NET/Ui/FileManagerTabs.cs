@@ -8,6 +8,7 @@ using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
 using FileManager.NET.Core.Navigation;
+using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 
 namespace FileManager.NET.Ui;
@@ -27,6 +28,7 @@ internal sealed class FileManagerTabs : Window
     private readonly IEntryFilter _entryFilter;
     private readonly IFileLauncher _fileLauncher;
     private readonly IFavoritesService _favoritesService;
+    private readonly ISortSettingsService _sortSettingsService;
     private readonly Tabs _tabs;
 
     // Guards against queuing more than one deferred tab-strip refresh at a time; rapid navigations
@@ -39,6 +41,7 @@ internal sealed class FileManagerTabs : Window
         IEntryFilter entryFilter,
         IFileLauncher fileLauncher,
         IFavoritesService favoritesService,
+        ISortSettingsService sortSettingsService,
         string startDirectory)
     {
         _app = app;
@@ -46,6 +49,7 @@ internal sealed class FileManagerTabs : Window
         _entryFilter = entryFilter;
         _fileLauncher = fileLauncher;
         _favoritesService = favoritesService;
+        _sortSettingsService = sortSettingsService;
 
         // The host window is only a full-screen frame; the Tabs container fills it and each
         // FileManagerWindow added to it becomes a tab. No outer border avoids a redundant frame
@@ -98,8 +102,8 @@ internal sealed class FileManagerTabs : Window
     /// </summary>
     private void OpenTab(string directory)
     {
-        var controller = new NavigationController(_directoryService, _entryFilter, _fileLauncher);
-        var pane = new FileManagerWindow(_app, controller, _favoritesService, directory);
+        var controller = new NavigationController(_directoryService, _entryFilter, _fileLauncher, _sortSettingsService);
+        var pane = new FileManagerWindow(_app, controller, _favoritesService, _sortSettingsService, directory);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.

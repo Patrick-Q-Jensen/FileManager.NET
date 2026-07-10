@@ -1,5 +1,6 @@
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
+using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 
 namespace FileManager.NET.Core.Navigation;
@@ -14,14 +15,46 @@ internal sealed class NavigationController
     private readonly IDirectoryService _directoryService;
     private readonly IEntryFilter _filter;
     private readonly IFileLauncher _launcher;
+    private readonly ISortSettingsService _sortSettings;
     private readonly NavigationState _state = new();
     private readonly Stack<string> _breadcrumb = new();
 
-    public NavigationController(IDirectoryService directoryService, IEntryFilter filter, IFileLauncher launcher)
+    // Null means "follow the global default"; set by SetLocalSortMode (Ctrl+O) to override it
+    // for just this pane.
+    private SortMode? _localSortMode;
+
+    public NavigationController(
+        IDirectoryService directoryService,
+        IEntryFilter filter,
+        IFileLauncher launcher,
+        ISortSettingsService sortSettings)
     {
         _directoryService = directoryService;
         _filter = filter;
         _launcher = launcher;
+        _sortSettings = sortSettings;
+
+        // Only re-sort/refresh when this pane is actually following the global default;
+        // panes with a local override are unaffected by other panes changing it.
+        _sortSettings.GlobalSortModeChanged += mode =>
+        {
+            if (_localSortMode is null)
+            {
+                ApplyFilter();
+                Changed?.Invoke();
+            }
+        };
+    }
+
+    /// <summary>The sort order currently in effect for this pane: the local override if set, else the global default.</summary>
+    public SortMode EffectiveSortMode => _localSortMode ?? _sortSettings.GlobalSortMode;
+
+    /// <summary>Overrides the sort order for this pane only, independent of the global default.</summary>
+    public void SetLocalSortMode(SortMode mode)
+    {
+        _localSortMode = mode;
+        ApplyFilter();
+        Changed?.Invoke();
     }
 
     /// <summary>Raised after any change to the navigation state.</summary>
@@ -179,6 +212,10 @@ internal sealed class NavigationController
         Changed?.Invoke();
     }
 
-    private void ApplyFilter() =>
-        _state.FilteredEntries = _filter.Filter(_state.AllEntries, _state.Query);
+    private void ApplyFilter()
+    {
+        var filtered = _filter.Filter(_state.AllEntries, _state.Query).ToList();
+        filtered.Sort((a, b) => EntryComparer.Compare(a, b, EffectiveSortMode));
+        _state.FilteredEntries = filtered;
+    }
 }

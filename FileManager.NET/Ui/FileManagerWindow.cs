@@ -11,6 +11,7 @@ using Terminal.Gui.Views;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Navigation;
+using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 
 namespace FileManager.NET.Ui;
@@ -33,6 +34,7 @@ internal sealed class FileManagerWindow : Window
     private readonly IApplication _app;
     private readonly NavigationController _controller;
     private readonly IFavoritesService _favoritesService;
+    private readonly ISortSettingsService _sortSettingsService;
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -64,11 +66,12 @@ internal sealed class FileManagerWindow : Window
     /// <summary>The directory currently displayed in this tab.</summary>
     internal string CurrentDirectory => _controller.CurrentDirectory;
 
-    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, string startDirectory)
+    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, ISortSettingsService sortSettingsService, string startDirectory)
     {
         _app = app;
         _controller = controller;
         _favoritesService = favoritesService;
+        _sortSettingsService = sortSettingsService;
 
         _filterLabel = new Label
         {
@@ -258,6 +261,14 @@ internal sealed class FileManagerWindow : Window
 
             case KeyCode.G:
                 ShowMoveToDialog();
+                return true;
+
+            case KeyCode.O when alt:
+                ShowSortDialog(global: true);
+                return true;
+
+            case KeyCode.O:
+                ShowSortDialog(global: false);
                 return true;
 
             case KeyCode.I when alt:
@@ -576,6 +587,68 @@ internal sealed class FileManagerWindow : Window
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnRanToCompletion,
             TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    // Handles both Ctrl+O (local, this pane only) and Ctrl+Alt+O (global default, persisted and
+    // applied to every pane not currently overriding it locally).
+    private void ShowSortDialog(bool global)
+    {
+        SortMode? chosen = null;
+
+        var hintLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = "[N]ame   [D]ate   [S]ize   Esc cancel",
+        };
+
+        var dialog = new Dialog
+        {
+            Title = global ? "Global Sort Order" : "Sort Order (this tab)",
+            Width = Dim.Percent(50),
+            Height = 6,
+        };
+
+        // Mask out modifier bits and normalize to uppercase so both lower and upper case letters
+        // are accepted, matching the paste-conflict dialog's key handling.
+        dialog.KeyDown += (_, k) =>
+        {
+            var ch = char.ToUpperInvariant((char)((uint)k.KeyCode & 0xFFFF));
+            SortMode? mode = ch switch
+            {
+                'N' => SortMode.Name,
+                'D' => SortMode.Date,
+                'S' => SortMode.Size,
+                _ => null,
+            };
+
+            if (mode is not null)
+            {
+                chosen = mode;
+                k.Handled = true;
+                _app.RequestStop();
+            }
+        };
+
+        dialog.Add(hintLabel);
+        RunDialog(dialog);
+
+        if (chosen is null)
+        {
+            return;
+        }
+
+        if (global)
+        {
+            _sortSettingsService.SetGlobalSortMode(chosen.Value);
+            _controller.SetStatus($"Global sort order set to {chosen.Value}.");
+        }
+        else
+        {
+            _controller.SetLocalSortMode(chosen.Value);
+            _controller.SetStatus($"Sort order for this tab set to {chosen.Value}.");
+        }
     }
 
     private void ShowDrivesDialog()
@@ -1076,6 +1149,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+D          Show drive picker",
             "  Ctrl+F          Show favorites",
             "  Ctrl+G          Go to path",
+            "  Ctrl+O          Set sort order (this tab)",
             "  Ctrl+X          Execute with arguments",
             "  Ctrl+T          Duplicate tab",
             "  Ctrl+Tab        Cycle to next tab",
@@ -1089,6 +1163,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+Alt+J      Go to parent  (vim-style)",
             "  Ctrl+Alt+L      Drill into directory  (vim-style)",
             "  Ctrl+Alt+P      Show Windows Properties dialog",
+            "  Ctrl+Alt+O      Set global sort order",
         };
 
         var listView = new ListView
