@@ -1097,10 +1097,11 @@ internal sealed class FileManagerWindow : Window
         // command like Ctrl+C, keep the current selection intact.
         if (!ReferenceEquals(entries, _renderedEntries))
         {
+            var nameColumnWidth = EntryRowFormatter.ComputeNameColumnWidth(entries);
             var rows = new ObservableCollection<string>();
             for (var i = 0; i < entries.Count; i++)
             {
-                rows.Add(EntryRowFormatter.Format(entries[i]));
+                rows.Add(EntryRowFormatter.Format(entries[i], nameColumnWidth));
             }
 
             _listView.SetSource(rows);
