@@ -378,29 +378,31 @@ internal sealed class FileManagerWindow : Window
 
     private void CopySelectedNameToClipboard()
     {
-        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
-        if (entry is null)
+        var entries = GetSelectedEntries(excludeParent: false);
+        if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to copy.");
             return;
         }
 
-        _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.Name)
-            ? $"Copied name: {entry.Name}"
+        var text = string.Join('\n', entries.Select(e => e.Name));
+        _controller.SetStatus(_app.Clipboard.TrySetClipboardData(text)
+            ? entries.Count == 1 ? $"Copied name: {entries[0].Name}" : $"Copied {entries.Count} names"
             : "Clipboard is not available.");
     }
 
     private void CopySelectedPathToClipboard()
     {
-        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
-        if (entry is null)
+        var entries = GetSelectedEntries(excludeParent: false);
+        if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to copy.");
             return;
         }
 
-        _controller.SetStatus(_app.Clipboard.TrySetClipboardData(entry.FullPath)
-            ? $"Copied path: {entry.FullPath}"
+        var text = string.Join('\n', entries.Select(e => e.FullPath));
+        _controller.SetStatus(_app.Clipboard.TrySetClipboardData(text)
+            ? entries.Count == 1 ? $"Copied path: {entries[0].FullPath}" : $"Copied {entries.Count} paths"
             : "Clipboard is not available.");
     }
 
@@ -428,16 +430,53 @@ internal sealed class FileManagerWindow : Window
 
     private void CopySelectedItemToClipboard()
     {
-        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
-        if (entry is null || entry.Name == "..")
+        var entries = GetSelectedEntries(excludeParent: true);
+        if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to copy.");
             return;
         }
 
-        _controller.SetStatus(WindowsFileClipboard.TrySetFiles([entry.FullPath])
-            ? $"Copied: {entry.Name}"
+        _controller.SetStatus(WindowsFileClipboard.TrySetFiles(entries.Select(e => e.FullPath).ToArray())
+            ? entries.Count == 1 ? $"Copied: {entries[0].Name}" : $"Copied {entries.Count} items"
             : "Clipboard is not available.");
+    }
+
+    // Returns every marked entry (Ctrl+B marking mode), falling back to just the current
+    // selection when nothing is marked. The ".." parent-directory row is optionally excluded
+    // since it can never be a meaningful copy source/destination.
+    private IReadOnlyList<FileSystemEntry> GetSelectedEntries(bool excludeParent)
+    {
+        var source = _listView.Source;
+        if (source is not null)
+        {
+            List<FileSystemEntry>? marked = null;
+            for (var i = 0; i < source.Count; i++)
+            {
+                if (!source.IsMarked(i))
+                {
+                    continue;
+                }
+
+                var markedEntry = _controller.GetEntry(i);
+                if (markedEntry is null || (excludeParent && markedEntry.Name == ".."))
+                {
+                    continue;
+                }
+
+                (marked ??= []).Add(markedEntry);
+            }
+
+            if (marked is { Count: > 0 })
+            {
+                return marked;
+            }
+        }
+
+        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
+        return entry is not null && (!excludeParent || entry.Name != "..")
+            ? [entry]
+            : [];
     }
 
     private void PasteFromClipboard()
