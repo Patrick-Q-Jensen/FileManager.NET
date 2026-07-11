@@ -202,7 +202,6 @@ internal sealed class FileManagerWindow : Window
     /// </summary>
     private bool TryHandleCommand(Key key)
     {
-        
         bool alt = key.IsAlt;
         var baseKey = key.KeyCode & ~(KeyCode.CtrlMask | KeyCode.AltMask);
 
