@@ -194,11 +194,7 @@ internal sealed class FileManagerWindow : Window
     }
 
     /// <summary>
-    /// Handles a Ctrl-initiated command from <paramref name="key"/>. Modifier state is read from the
-    /// reliable <see cref="Key.IsShift"/>/<see cref="Key.IsCtrl"/> properties (the Shift bit in
-    /// <see cref="Key.KeyCode"/> is not independently set for alpha keys), and Shift selects between
-    /// command variants (e.g. Ctrl+C copies the name, Ctrl+Shift+C copies the full path). Returns
-    /// <c>true</c> when the key mapped to a command. New commands are added as cases here.
+    /// Handles a Ctrl-initiated command from <paramref name="key"/>. CtrlMask and AltMask are used to get the base key.
     /// </summary>
     private bool TryHandleCommand(Key key)
     {
@@ -304,7 +300,7 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
-    // Ctrl+M toggles "marking mode": while enabled, Space checks/unchecks individual entries
+    // Ctrl+B toggles "box select mode": while enabled, Space checks/unchecks individual entries
     // (the ListView's built-in mark toggle, shown via ShowMarks) instead of Space falling
     // through to the live filter as a typed character.
     private void ToggleMarkingMode()
@@ -1164,6 +1160,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+N          Copy selected name to clipboard",
             "  Ctrl+P          Copy selected path to clipboard",
             "  Ctrl+R          Rename selected item",
+            "  Ctrl+B          Toggle marking mode (hint ctrl+A will select all, ctrl+u will unselect all)",
             "  Ctrl+D          Show drive picker",
             "  Ctrl+F          Show favorites",
             "  Ctrl+G          Go to path",
