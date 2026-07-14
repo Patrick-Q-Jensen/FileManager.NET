@@ -1,3 +1,5 @@
+using Serilog;
+
 namespace FileManager.NET.Core.FileSystem;
 
 /// <summary>
@@ -26,8 +28,9 @@ internal sealed class DirectoryService : IDirectoryService
                     {
                         size = file.Length;
                     }
-                    catch (IOException)
+                    catch (IOException ex)
                     {
+                        Log.Warning(ex, "Failed to read file size for {Path}", info.FullName);
                         size = 0;
                     }
                 }
@@ -45,16 +48,19 @@ internal sealed class DirectoryService : IDirectoryService
             // (local or global) after loading, so ordering is never done twice.
             return new DirectoryListing(entries, null);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException ex)
         {
+            Log.Warning(ex, "Access denied while listing directory {Path}", path);
             return new DirectoryListing(Array.Empty<FileSystemEntry>(), $"Access denied: {path}");
         }
-        catch (DirectoryNotFoundException)
+        catch (DirectoryNotFoundException ex)
         {
+            Log.Warning(ex, "Directory not found: {Path}", path);
             return new DirectoryListing(Array.Empty<FileSystemEntry>(), $"Not found: {path}");
         }
         catch (IOException ex)
         {
+            Log.Warning(ex, "I/O error while listing directory {Path}", path);
             return new DirectoryListing(Array.Empty<FileSystemEntry>(), ex.Message);
         }
     }

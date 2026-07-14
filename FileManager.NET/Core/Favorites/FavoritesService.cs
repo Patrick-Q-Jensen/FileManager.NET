@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Serilog;
 
 namespace FileManager.NET.Core.Favorites;
 
@@ -158,6 +159,7 @@ internal sealed class FavoritesService : IFavoritesService
             }
             catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
             {
+                Log.Warning(ex, "Failed to load favorites from {FilePath}", FilePath);
                 ErrorOccurred?.Invoke($"Load favorites failed: {ex.Message}");
             }
         }
@@ -190,6 +192,7 @@ internal sealed class FavoritesService : IFavoritesService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            Log.Warning(ex, "Favorites operation {Operation} failed for {FilePath}", operation, FilePath);
             ErrorOccurred?.Invoke($"{operation} failed: {ex.Message}");
             return false;
         }

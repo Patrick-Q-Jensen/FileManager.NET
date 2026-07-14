@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using Serilog;
 using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Drivers;
@@ -133,6 +134,7 @@ internal sealed class FileManagerWindow : Window
         {
             // Best-effort background check; a transient I/O failure here should never surface
             // as a crash or disrupt what the user is doing.
+            Log.Warning(ex, "Auto-refresh failed for {Directory}", _controller.CurrentDirectory);
         }
 
         return true;
@@ -463,6 +465,7 @@ internal sealed class FileManagerWindow : Window
         catch (Exception ex)
         {
             _controller.SetStatus($"Properties failed: {ex.Message}");
+            Log.Warning(ex, "Failed to show properties for {Path}", entry.FullPath);
         }
     }
 
@@ -585,6 +588,7 @@ internal sealed class FileManagerWindow : Window
             catch (Exception ex)
             {
                 firstError ??= $"{name}: {ex.Message}";
+                Log.Warning(ex, "Failed to paste {Source} to {Dest}", source, dest);
             }
         }
 
@@ -994,6 +998,7 @@ internal sealed class FileManagerWindow : Window
         catch (Exception ex)
         {
             _controller.SetStatus($"Delete failed: {ex.Message}");
+            Log.Warning(ex, "Failed to delete {Path}", entry.FullPath);
         }
     }
 
@@ -1074,6 +1079,7 @@ internal sealed class FileManagerWindow : Window
         catch (Exception ex)
         {
             _controller.SetStatus($"Rename failed: {ex.Message}");
+            Log.Warning(ex, "Failed to rename {Path} to {NewName}", entry.FullPath, newName);
         }
     }
 
@@ -1135,6 +1141,7 @@ internal sealed class FileManagerWindow : Window
         catch (Exception ex)
         {
             _controller.SetStatus($"Launch failed: {ex.Message}");
+            Log.Warning(ex, "Failed to launch {Path} with args {Args}", entry.FullPath, args);
         }
     }
 
@@ -1211,6 +1218,7 @@ internal sealed class FileManagerWindow : Window
         catch (Exception ex)
         {
             _controller.SetStatus($"Go to failed: {ex.Message}");
+            Log.Warning(ex, "Failed to go to {Path}", input);
         }
     }
 

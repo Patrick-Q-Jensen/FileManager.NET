@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Serilog;
 
 namespace FileManager.NET.Platform;
 
@@ -20,6 +21,7 @@ internal sealed class WindowsFileLauncher : IFileLauncher
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "Failed to open {Path}", path);
             return $"Could not open '{Path.GetFileName(path)}': {ex.Message}";
         }
     }

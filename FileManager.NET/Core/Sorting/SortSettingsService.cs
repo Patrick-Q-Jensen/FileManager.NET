@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Serilog;
 
 namespace FileManager.NET.Core.Sorting;
 
@@ -75,6 +76,7 @@ internal sealed class SortSettingsService : ISortSettingsService
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
             // Fall back to the default sort order; there is nothing else to recover from here.
+            Log.Warning(ex, "Failed to load sort settings from {FilePath}", FilePath);
         }
     }
 
@@ -92,6 +94,7 @@ internal sealed class SortSettingsService : ISortSettingsService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // Persist failures are non-fatal: the chosen order still applies for this session.
+            Log.Warning(ex, "Failed to persist sort settings to {FilePath}", FilePath);
         }
     }
 
