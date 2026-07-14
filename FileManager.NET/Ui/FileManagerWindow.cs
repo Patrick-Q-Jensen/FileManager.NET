@@ -27,6 +27,11 @@ internal sealed class FileManagerWindow : Window
     // Upper bound for the path portion of the title before its leading segments are elided.
     private const int MaxPathTitleLength = 48;
 
+    // How often the current directory is silently re-checked for external changes (files added,
+    // removed, or renamed by another process). Kept fairly relaxed since this is a convenience
+    // feature, not a live filesystem watch.
+    private static readonly TimeSpan AutoRefreshInterval = TimeSpan.FromSeconds(10);
+
     // Set by the host (FileManagerTabs) to keep all tab headers the same width. Defaults to 20
     // until the host computes the available-width-divided-by-tab-count value.
     internal int TabTitleWidth { get; set; } = 20;
@@ -46,6 +51,9 @@ internal sealed class FileManagerWindow : Window
     // Tracks the directory the tab header was last drawn for. When it changes (drill-down or
     // move to parent) DirectoryChanged is raised so the host can refresh the tab strip.
     private string? _renderedDirectory;
+
+    // Token for the periodic auto-refresh timeout, used to unregister it on disposal.
+    private object? _autoRefreshToken;
 
     /// <summary>
     /// Raised when this tab has navigated to a different directory (and therefore its tab header
@@ -109,6 +117,36 @@ internal sealed class FileManagerWindow : Window
 
         _controller.EnterDirectory(startDirectory);
         _listView.SetFocus();
+
+        _autoRefreshToken = _app.AddTimeout(AutoRefreshInterval, OnAutoRefreshTimer);
+    }
+
+    // Runs on the main UI thread (per IApplication.AddTimeout), so it's safe to touch the
+    // controller/views directly. Returning true keeps the timer repeating.
+    private bool OnAutoRefreshTimer()
+    {
+        try
+        {
+            _controller.RefreshFromDisk();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best-effort background check; a transient I/O failure here should never surface
+            // as a crash or disrupt what the user is doing.
+        }
+
+        return true;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && _autoRefreshToken is not null)
+        {
+            _app.RemoveTimeout(_autoRefreshToken);
+            _autoRefreshToken = null;
+        }
+
+        base.Dispose(disposing);
     }
 
     private void OnCharacterTyped(char character) => _controller.AppendToQuery(character);

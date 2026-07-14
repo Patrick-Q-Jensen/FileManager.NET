@@ -199,6 +199,38 @@ internal sealed class NavigationController
         }
     }
 
+    /// <summary>
+    /// Re-reads the current directory from disk and, only if its contents actually changed,
+    /// updates the entry list and raises <see cref="Changed"/>. Used by the periodic auto-refresh
+    /// timer so a quiet directory never disturbs the current filter, selection, or scroll
+    /// position. Unlike <see cref="LoadDirectory"/>, the query is preserved.
+    /// </summary>
+    public void RefreshFromDisk()
+    {
+        var listing = _directoryService.Load(_state.CurrentDirectory);
+        if (EntriesEqual(_state.AllEntries, listing.Entries) && listing.Error == _state.StatusMessage)
+        {
+            return;
+        }
+
+        _state.AllEntries = listing.Entries.ToList();
+        _state.StatusMessage = listing.Error;
+        ApplyFilter();
+        Changed?.Invoke();
+    }
+
+    // Order-independent comparison: enumeration order can vary between passes even when
+    // nothing has changed, so an unordered set comparison avoids spurious refreshes.
+    private static bool EntriesEqual(IReadOnlyList<FileSystemEntry> before, IReadOnlyList<FileSystemEntry> after)
+    {
+        if (before.Count != after.Count)
+        {
+            return false;
+        }
+
+        return before.ToHashSet().SetEquals(after);
+    }
+
     /// <summary>Returns the entry at <paramref name="index"/>, or <c>null</c> when out of range.</summary>
     public FileSystemEntry? GetEntry(int index) =>
         index >= 0 && index < _state.FilteredEntries.Count
