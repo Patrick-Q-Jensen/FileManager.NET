@@ -69,7 +69,7 @@ namespace FileManager.NET
             string logDirectory = Path.Combine(AppContext.BaseDirectory, "Logs");
 
             Log.Logger = new LoggerConfiguration()
-                .MinimumLevel.Debug()
+                .MinimumLevel.Information()
                 .WriteTo.File(
                     Path.Combine(logDirectory, "log-.txt"),
                     rollingInterval: RollingInterval.Day,
