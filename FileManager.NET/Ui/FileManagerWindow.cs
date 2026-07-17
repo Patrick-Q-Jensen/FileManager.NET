@@ -41,6 +41,7 @@ internal sealed class FileManagerWindow : Window
     private readonly NavigationController _controller;
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
+    private readonly ZipArchiveService _zipArchiveService = new();
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -313,6 +314,10 @@ internal sealed class FileManagerWindow : Window
                 ShowExecuteDialog();
                 return true;
 
+            case KeyCode.Z:
+                CreateZipArchive();
+                return true;
+
             case KeyCode.D:
                 ShowDrivesDialog();
                 return true;
@@ -564,6 +569,105 @@ internal sealed class FileManagerWindow : Window
         return entry is not null && (!excludeParent || entry.Name != "..")
             ? [entry]
             : [];
+    }
+
+    private void CreateZipArchive()
+    {
+        var entries = GetSelectedEntries(excludeParent: true);
+        if (entries.Count == 0)
+        {
+            _controller.SetStatus("Nothing selected to archive.");
+            return;
+        }
+
+        var destinationDirectory = _controller.CurrentDirectory;
+
+        var statusLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = "Preparing archive…",
+        };
+
+        var progressLabel = new Label
+        {
+            X = 1,
+            Y = 3,
+            Width = Dim.Fill(1),
+            Text = "[                                ]   0%",
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "Creating ZIP Archive",
+            Width = Dim.Percent(60),
+            Height = 7,
+        };
+        dialog.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode == KeyCode.Esc)
+            {
+                key.Handled = true;
+            }
+        };
+        dialog.Add(statusLabel, progressLabel);
+
+        ZipArchiveResult? result = null;
+        string? failure = null;
+        var progress = new Progress<ZipArchiveProgress>(update => _app.Invoke(() =>
+        {
+            var percent = update.TotalFiles == 0 ? 100 : update.FilesProcessed * 100 / update.TotalFiles;
+            const int barWidth = 32;
+            var filled = percent * barWidth / 100;
+            progressLabel.Text = $"[{new string('#', filled)}{new string('-', barWidth - filled)}] {percent,3}%  {update.FilesProcessed}/{update.TotalFiles} files";
+            statusLabel.Text = "Compressing files…";
+            dialog.SetNeedsDraw();
+        }));
+
+        _ = Task.Run(() => _zipArchiveService.Create(entries.ToArray(), destinationDirectory, progress))
+            .ContinueWith(task =>
+            {
+                if (task.IsCompletedSuccessfully)
+                {
+                    result = task.Result;
+                }
+                else
+                {
+                    failure = task.Exception?.GetBaseException().Message ?? "An unexpected error occurred.";
+                    Log.Error(task.Exception, "ZIP archive creation failed unexpectedly");
+                }
+
+                _app.RequestStop();
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());
+
+        RunDialog(dialog);
+
+        if (failure is not null)
+        {
+            _controller.SetStatus($"Archive failed: {failure}");
+            return;
+        }
+
+        if (result is null || result.ArchivePath is null)
+        {
+            var error = result?.Errors.FirstOrDefault() ?? "No files could be archived.";
+            _controller.SetStatus($"Archive failed: {error}");
+            return;
+        }
+
+        try
+        {
+            _controller.RefreshFromDisk();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Created ZIP archive but failed to refresh {Directory}", destinationDirectory);
+        }
+
+        _controller.SetStatus(result.Errors.Count == 0
+            ? $"Created: {Path.GetFileName(result.ArchivePath)} ({result.FilesAdded} files)"
+            : $"Created {Path.GetFileName(result.ArchivePath)}: {result.FilesAdded} files, {result.Errors.Count} skipped.");
     }
 
     private void PasteFromClipboard()
@@ -1291,6 +1395,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+N          Copy selected name to clipboard",
             "  Ctrl+P          Copy selected path to clipboard",
             "  Ctrl+R          Rename selected item",
+            "  Ctrl+Z          Create ZIP archive from selected items",
             "  Ctrl+B          Toggle marking mode (hint ctrl+A will select all, ctrl+u will unselect all)",
             "  Ctrl+D          Show drive picker",
             "  Ctrl+F          Show favorites",
