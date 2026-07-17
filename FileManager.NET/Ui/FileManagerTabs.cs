@@ -4,6 +4,7 @@ using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
+using Serilog;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
@@ -86,6 +87,11 @@ internal sealed class FileManagerTabs : Window
                     key.Handled = true;
                     return true;
 
+                case KeyCode.W:
+                    CloseCurrentTab();
+                    key.Handled = true;
+                    return true;
+
                 case KeyCode.Tab:
                     CycleToNextTab();
                     key.Handled = true;
@@ -112,6 +118,7 @@ internal sealed class FileManagerTabs : Window
         // Wire tab-management commands so the pane handles them directly without bubbling.
         pane.SwitchToTab = GoToTab;
         pane.DuplicateTab = DuplicateCurrentTab;
+        pane.CloseTab = CloseCurrentTab;
         pane.CycleTab = CycleToNextTab;
 
         _tabs.Add(pane);
@@ -196,6 +203,47 @@ internal sealed class FileManagerTabs : Window
             ?? Environment.CurrentDirectory;
 
         OpenTab(currentDirectory);
+    }
+
+    /// <summary>
+    /// Closes the active tab. Closing the final tab exits the application rather than leaving an
+    /// empty tab container. Removed panes are disposed to stop their periodic refresh timer.
+    /// </summary>
+    private void CloseCurrentTab()
+    {
+        var tabs = _tabs.TabCollection.ToList();
+        if (tabs.Count == 0)
+        {
+            return;
+        }
+
+        if (tabs.Count == 1)
+        {
+            _app.RequestStop();
+            return;
+        }
+
+        var current = _tabs.Value;
+        var currentIndex = current is null ? -1 : _tabs.IndexOf(current);
+        if (currentIndex < 0)
+        {
+            return;
+        }
+
+        var nextTab = tabs[currentIndex == tabs.Count - 1 ? currentIndex - 1 : currentIndex + 1];
+
+        try
+        {
+            _tabs.Value = nextTab;
+            nextTab.SetFocus();
+            _tabs.Remove(current!);
+            current!.Dispose();
+            ApplyTabTitleWidths();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to close the current tab.");
+        }
     }
 
     /// <summary>Advances focus to the next tab, wrapping around from the last tab to the first.</summary>

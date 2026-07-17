@@ -69,6 +69,9 @@ internal sealed class FileManagerWindow : Window
     /// <summary>Set by the host to handle Ctrl+T duplicate-tab from within this pane.</summary>
     internal Action? DuplicateTab { get; set; }
 
+    /// <summary>Set by the host to handle Ctrl+W close-tab from within this pane.</summary>
+    internal Action? CloseTab { get; set; }
+
     /// <summary>Set by the host to handle Ctrl+Tab next-tab from within this pane.</summary>
     internal Action? CycleTab { get; set; }
 
@@ -315,6 +318,10 @@ internal sealed class FileManagerWindow : Window
 
             case KeyCode.T:
                 DuplicateTab?.Invoke();
+                return true;
+
+            case KeyCode.W:
+                CloseTab?.Invoke();
                 return true;
 
             case KeyCode.Tab:
@@ -1278,6 +1285,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+O          Set sort order (this tab)",
             "  Ctrl+X          Execute with arguments",
             "  Ctrl+T          Duplicate tab",
+            "  Ctrl+W          Close current tab",
             "  Ctrl+Tab        Cycle to next tab",
             "  Ctrl+Q          Quit",
             "  Ctrl+Alt+H      Show this help",
