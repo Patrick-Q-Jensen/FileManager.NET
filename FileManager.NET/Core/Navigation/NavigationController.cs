@@ -93,6 +93,31 @@ internal sealed class NavigationController
     }
 
     /// <summary>
+    /// Attempts to enter a directory without changing the current state when it cannot be read.
+    /// Used to restore a prior session without opening tabs for disconnected or inaccessible paths.
+    /// </summary>
+    public bool TryEnterDirectory(string path)
+    {
+        try
+        {
+            var listing = _directoryService.Load(path);
+            if (listing.Error is not null)
+            {
+                return false;
+            }
+
+            RestoredSelection = null;
+            ApplyListing(path, listing);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to restore directory {Path}", path);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Reloads the current directory and re-selects <paramref name="entryName"/> after the
     /// reload. Mirrors the <see cref="GoToParent"/> pattern of setting
     /// <see cref="RestoredSelection"/> before calling <see cref="LoadDirectory"/>.
@@ -112,6 +137,11 @@ internal sealed class NavigationController
             "LoadDirectory {Path} took {ElapsedMs}ms ({EntryCount} entries)",
             path, stopwatch.ElapsedMilliseconds, listing.Entries.Count);
 
+        ApplyListing(path, listing);
+    }
+
+    private void ApplyListing(string path, DirectoryListing listing)
+    {
         _state.CurrentDirectory = path;
         _state.AllEntries = listing.Entries.ToList();
         _state.Query = string.Empty;

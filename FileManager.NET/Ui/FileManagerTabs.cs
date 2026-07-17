@@ -9,6 +9,7 @@ using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
 using FileManager.NET.Core.Navigation;
+using FileManager.NET.Core.Session;
 using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 
@@ -44,7 +45,8 @@ internal sealed class FileManagerTabs : Window
         IFileLauncher fileLauncher,
         IFavoritesService favoritesService,
         ISortSettingsService sortSettingsService,
-        string startDirectory)
+        string startDirectory,
+        SessionState sessionState)
     {
         _app = app;
         _directoryService = directoryService;
@@ -68,7 +70,7 @@ internal sealed class FileManagerTabs : Window
 
         Add(_tabs);
 
-        OpenTab(startDirectory);
+        RestoreTabs(sessionState, startDirectory);
     }
 
     /// <summary>
@@ -117,10 +119,21 @@ internal sealed class FileManagerTabs : Window
     /// Creates a new <see cref="FileManagerWindow"/> browsing <paramref name="directory"/>,
     /// adds it as a tab, and focuses it.
     /// </summary>
-    private void OpenTab(string directory)
+    private FileManagerWindow? OpenTab(string directory, bool requireReachable = false)
     {
         var controller = new NavigationController(_directoryService, _entryFilter, _fileLauncher, _sortSettingsService);
-        var pane = new FileManagerWindow(_app, controller, _favoritesService, _sortSettingsService, directory);
+        if (requireReachable && !controller.TryEnterDirectory(directory))
+        {
+            Log.Information("Skipping unavailable restored tab for {Directory}", directory);
+            return null;
+        }
+
+        if (!requireReachable)
+        {
+            controller.EnterDirectory(directory);
+        }
+
+        var pane = new FileManagerWindow(_app, controller, _favoritesService, _sortSettingsService);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.
@@ -142,6 +155,41 @@ internal sealed class FileManagerTabs : Window
         // dimensions. A single defer is not enough because Frame.Width is still 0 on the first
         // pump cycle after Add().
         _app.Invoke(() => _app.Invoke(ApplyTabTitleWidths));
+        return pane;
+    }
+
+    private void RestoreTabs(SessionState sessionState, string startDirectory)
+    {
+        FileManagerWindow? activePane = null;
+
+        for (int index = 0; index < sessionState.Directories.Count; index++)
+        {
+            var pane = OpenTab(sessionState.Directories[index], requireReachable: true);
+            if (index == sessionState.ActiveTabIndex)
+            {
+                activePane = pane;
+            }
+        }
+
+        if (_tabs.TabCollection.Any())
+        {
+            if (activePane is not null)
+            {
+                _tabs.Value = activePane;
+                activePane.SetFocus();
+            }
+
+            return;
+        }
+
+        OpenTab(startDirectory);
+    }
+
+    internal SessionState GetSessionState()
+    {
+        var panes = _tabs.TabCollection.OfType<FileManagerWindow>().ToArray();
+        var activeIndex = Array.IndexOf(panes, _tabs.Value);
+        return new SessionState(panes.Select(pane => pane.CurrentDirectory).ToArray(), Math.Max(0, activeIndex));
     }
 
     /// <summary>

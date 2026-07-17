@@ -81,7 +81,7 @@ internal sealed class FileManagerWindow : Window
     /// <summary>The directory currently displayed in this tab.</summary>
     internal string CurrentDirectory => _controller.CurrentDirectory;
 
-    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, ISortSettingsService sortSettingsService, string startDirectory)
+    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, ISortSettingsService sortSettingsService)
     {
         _app = app;
         _controller = controller;
@@ -122,7 +122,10 @@ internal sealed class FileManagerWindow : Window
         _controller.Changed += Refresh;
         _favoritesService.ErrorOccurred += OnFavoritesError;
 
-        _controller.EnterDirectory(startDirectory);
+        // The tab host loads the initial directory before constructing this pane so restored
+        // directories can be validated without a second filesystem read. Render that existing
+        // state now because its Changed notification occurred before this subscription.
+        Refresh();
         _listView.SetFocus();
 
         _autoRefreshToken = _app.AddTimeout(AutoRefreshInterval, OnAutoRefreshTimer);
@@ -242,16 +245,11 @@ internal sealed class FileManagerWindow : Window
                 return;
 
             case KeyCode.Esc:
-                // Esc breaks out of filtering mode: clear an active filter first, and only quit
-                // when there is nothing to clear. This keeps deleting the filter from ever moving
-                // up a directory.
+                // Esc breaks out of filtering mode without exiting the application. This keeps
+                // deleting the filter from ever moving up a directory.
                 if (_controller.Query.Length > 0)
                 {
                     _controller.ClearQuery();
-                }
-                else
-                {
-                    _app.RequestStop();
                 }
 
                 key.Handled = true;

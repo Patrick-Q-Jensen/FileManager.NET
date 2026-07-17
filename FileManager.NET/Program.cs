@@ -4,6 +4,7 @@ using Terminal.Gui.App;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
+using FileManager.NET.Core.Session;
 using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 using FileManager.NET.Ui;
@@ -28,6 +29,10 @@ namespace FileManager.NET
                 string startDirectory = args.Length > 0 && Directory.Exists(args[0])
                     ? Path.GetFullPath(args[0])
                     : Environment.CurrentDirectory;
+                var sessionStateService = new SessionStateService();
+                var sessionState = args.Length == 0
+                    ? sessionStateService.Load()
+                    : SessionState.Empty;
 
                 IDirectoryService directoryService = new DirectoryService();
                 IEntryFilter filter = new SubstringEntryFilter();
@@ -48,8 +53,15 @@ namespace FileManager.NET
                 using IApplication app = Application.Create();
                 app.Init();
 
-                using FileManagerTabs tabs = new FileManagerTabs(app, directoryService, filter, launcher, favorites, sortSettings, startDirectory);
-                app.Run(tabs);
+                using FileManagerTabs tabs = new FileManagerTabs(app, directoryService, filter, launcher, favorites, sortSettings, startDirectory, sessionState);
+                try
+                {
+                    app.Run(tabs);
+                }
+                finally
+                {
+                    SaveSessionState(sessionStateService, tabs);
+                }
             }
             catch (Exception ex)
             {
@@ -75,6 +87,18 @@ namespace FileManager.NET
                     rollingInterval: RollingInterval.Day,
                     retainedFileCountLimit: 14)
                 .CreateLogger();
+        }
+
+        private static void SaveSessionState(SessionStateService sessionStateService, FileManagerTabs tabs)
+        {
+            try
+            {
+                sessionStateService.Save(tabs.GetSessionState());
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to capture session state at shutdown.");
+            }
         }
     }
 }
