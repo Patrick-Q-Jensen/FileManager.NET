@@ -17,8 +17,9 @@ namespace FileManager.NET.Ui;
 /// <summary>
 /// Root window for the application. Hosts one or more <see cref="FileManagerWindow"/> instances
 /// as tabs inside a Terminal.Gui <see cref="Tabs"/> container. Handles tab-management key chords
-/// (Ctrl+T duplicate, Ctrl+Tab cycle, Ctrl+1-9 direct jump); these are left unhandled by the
-/// focused pane and therefore bubble up to this window's <see cref="OnKeyDown"/>.
+/// (Ctrl+T duplicate, Ctrl+Tab cycle, Ctrl+Left/Right adjacent navigation, Ctrl+1-9 direct jump);
+/// these are left unhandled by the focused pane and therefore bubble up to this window's
+/// <see cref="OnKeyDown"/>.
 /// </summary>
 internal sealed class FileManagerTabs : Window
 {
@@ -96,6 +97,16 @@ internal sealed class FileManagerTabs : Window
                     CycleToNextTab();
                     key.Handled = true;
                     return true;
+
+                case KeyCode.CursorLeft:
+                    MoveToAdjacentTab(-1);
+                    key.Handled = true;
+                    return true;
+
+                case KeyCode.CursorRight:
+                    MoveToAdjacentTab(1);
+                    key.Handled = true;
+                    return true;
             }
         }
 
@@ -120,6 +131,7 @@ internal sealed class FileManagerTabs : Window
         pane.DuplicateTab = DuplicateCurrentTab;
         pane.CloseTab = CloseCurrentTab;
         pane.CycleTab = CycleToNextTab;
+        pane.MoveToAdjacentTab = MoveToAdjacentTab;
 
         _tabs.Add(pane);
         _tabs.Value = pane;
@@ -249,14 +261,25 @@ internal sealed class FileManagerTabs : Window
     /// <summary>Advances focus to the next tab, wrapping around from the last tab to the first.</summary>
     private void CycleToNextTab()
     {
+        MoveToAdjacentTab(1);
+    }
+
+    /// <summary>Moves focus by <paramref name="direction"/> tabs, wrapping at either end.</summary>
+    private void MoveToAdjacentTab(int direction)
+    {
         var tabs = _tabs.TabCollection.ToList();
-        if (tabs.Count <= 1)
+        if (tabs.Count <= 1 || direction == 0)
         {
             return;
         }
 
-        int current = _tabs.IndexOf(_tabs.Value!);
-        int next = (current + 1) % tabs.Count;
+        var current = _tabs.Value is null ? -1 : _tabs.IndexOf(_tabs.Value);
+        if (current < 0)
+        {
+            return;
+        }
+
+        var next = (current + direction + tabs.Count) % tabs.Count;
         _tabs.Value = tabs[next];
         tabs[next].SetFocus();
     }

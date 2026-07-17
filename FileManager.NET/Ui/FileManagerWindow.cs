@@ -75,6 +75,9 @@ internal sealed class FileManagerWindow : Window
     /// <summary>Set by the host to handle Ctrl+Tab next-tab from within this pane.</summary>
     internal Action? CycleTab { get; set; }
 
+    /// <summary>Set by the host to move to the adjacent tab; -1 is left and 1 is right.</summary>
+    internal Action<int>? MoveToAdjacentTab { get; set; }
+
     /// <summary>The directory currently displayed in this tab.</summary>
     internal string CurrentDirectory => _controller.CurrentDirectory;
 
@@ -330,6 +333,14 @@ internal sealed class FileManagerWindow : Window
 
             case KeyCode.Tab:
                 CycleTab?.Invoke();
+                return true;
+
+            case KeyCode.CursorLeft:
+                MoveToAdjacentTab?.Invoke(-1);
+                return true;
+
+            case KeyCode.CursorRight:
+                MoveToAdjacentTab?.Invoke(1);
                 return true;
 
             case KeyCode.G:
