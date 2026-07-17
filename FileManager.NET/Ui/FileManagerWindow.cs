@@ -142,6 +142,10 @@ internal sealed class FileManagerWindow : Window
             // as a crash or disrupt what the user is doing.
             Log.Warning(ex, "Auto-refresh failed for {Directory}", _controller.CurrentDirectory);
         }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Unexpected auto-refresh failure for {Directory}", _controller.CurrentDirectory);
+        }
 
         return true;
     }
@@ -1334,6 +1338,13 @@ internal sealed class FileManagerWindow : Window
         // command like Ctrl+C, keep the current selection intact.
         if (!ReferenceEquals(entries, _renderedEntries))
         {
+            var selectedPath = _listView.SelectedItem is int selectedItem
+                && _renderedEntries is { } renderedEntries
+                && selectedItem >= 0
+                && selectedItem < renderedEntries.Count
+                    ? renderedEntries[selectedItem].FullPath
+                    : null;
+
             var nameColumnWidth = EntryRowFormatter.ComputeNameColumnWidth(entries);
             var rows = new ObservableCollection<string>();
             for (var i = 0; i < entries.Count; i++)
@@ -1348,11 +1359,12 @@ internal sealed class FileManagerWindow : Window
             _controller.ConsumeRestoredSelection();
 
             int selectedIndex = 0;
-            if (restore is not null)
+            if (restore is not null || selectedPath is not null)
             {
                 for (int i = 0; i < entries.Count; i++)
                 {
-                    if (string.Equals(entries[i].Name, restore, StringComparison.OrdinalIgnoreCase))
+                    if ((restore is not null && string.Equals(entries[i].Name, restore, StringComparison.OrdinalIgnoreCase))
+                        || (restore is null && string.Equals(entries[i].FullPath, selectedPath, StringComparison.OrdinalIgnoreCase)))
                     {
                         selectedIndex = i;
                         break;

@@ -215,14 +215,12 @@ internal sealed class NavigationController
     public void RefreshFromDisk()
     {
         var listing = _directoryService.Load(_state.CurrentDirectory);
-        var changed = !EntriesEqual(_state.AllEntries, listing.Entries) || listing.Error != _state.StatusMessage;
-        if (!changed)
+        if (listing.Error is not null || EntriesEqual(_state.AllEntries, listing.Entries))
         {
             return;
         }
 
         _state.AllEntries = listing.Entries.ToList();
-        _state.StatusMessage = listing.Error;
         ApplyFilter();
         Changed?.Invoke();
     }
