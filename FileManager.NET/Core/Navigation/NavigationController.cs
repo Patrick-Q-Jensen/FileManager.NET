@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
 using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
+using Serilog;
 
 namespace FileManager.NET.Core.Navigation;
 
@@ -103,7 +105,12 @@ internal sealed class NavigationController
 
     private void LoadDirectory(string path)
     {
+        var stopwatch = Stopwatch.StartNew();
         var listing = _directoryService.Load(path);
+        stopwatch.Stop();
+        Log.Debug(
+            "LoadDirectory {Path} took {ElapsedMs}ms ({EntryCount} entries)",
+            path, stopwatch.ElapsedMilliseconds, listing.Entries.Count);
 
         _state.CurrentDirectory = path;
         _state.AllEntries = listing.Entries.ToList();
@@ -208,7 +215,8 @@ internal sealed class NavigationController
     public void RefreshFromDisk()
     {
         var listing = _directoryService.Load(_state.CurrentDirectory);
-        if (EntriesEqual(_state.AllEntries, listing.Entries) && listing.Error == _state.StatusMessage)
+        var changed = !EntriesEqual(_state.AllEntries, listing.Entries) || listing.Error != _state.StatusMessage;
+        if (!changed)
         {
             return;
         }

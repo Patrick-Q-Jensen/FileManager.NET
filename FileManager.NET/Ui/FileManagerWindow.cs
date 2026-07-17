@@ -122,6 +122,9 @@ internal sealed class FileManagerWindow : Window
         _autoRefreshToken = _app.AddTimeout(AutoRefreshInterval, OnAutoRefreshTimer);
     }
 
+    // Measures the full handling time for a navigation key (including any synchronous UI
+    // refresh triggered by NavigationController.Changed), so slowdowns can be attributed to
+    // the disk read (already logged separately by the controller) versus UI work.
     // Runs on the main UI thread (per IApplication.AddTimeout), so it's safe to touch the
     // controller/views directly. Returning true keeps the timer repeating.
     private bool OnAutoRefreshTimer()
@@ -156,7 +159,30 @@ internal sealed class FileManagerWindow : Window
     private void OnFavoritesError(string message) =>
         _app.Invoke(() => _controller.SetStatus(message));
 
+    // Timestamped on entry so we can measure per-key latency end to end: our own handler
+    // (below) plus, via the queued follow-up, any native handling (e.g. ListView Up/Down
+    // navigation) and redraw that happen afterward in this same main-loop pass.
     private void OnEntryKeyDown(object? sender, Key key)
+    {
+        var keyCode = key.KeyCode;
+        var receivedAt = Stopwatch.GetTimestamp();
+
+        HandleEntryKeyDown(key);
+
+        var handlerMs = Stopwatch.GetElapsedTime(receivedAt).TotalMilliseconds;
+        Log.Debug("Key {KeyCode}: our handler took {HandlerMs:F1}ms", keyCode, handlerMs);
+
+        // Queued to run on a later main-loop iteration, after Terminal.Gui has finished any
+        // native key handling and redraw triggered by this key. Comparing this to the handler
+        // time above shows whether a slow key is caused by our code or by framework/redraw work.
+        _app.Invoke(() =>
+        {
+            var settledMs = Stopwatch.GetElapsedTime(receivedAt).TotalMilliseconds;
+            Log.Debug("Key {KeyCode}: settled after {SettledMs:F1}ms (key received to UI idle)", keyCode, settledMs);
+        });
+    }
+
+    private void HandleEntryKeyDown(Key key)
     {
         // Ctrl-chords are commands, never filter input. Dispatch them first so no command key
         // ever falls through to navigation or the live filter.
