@@ -326,6 +326,12 @@ internal sealed class FileManagerWindow : Window
                 ShowRenameDialog();
                 return true;
 
+            // Ctrl+Alt+A creates a new file. Plain Ctrl+A was ruled out because the entry list
+            // already uses it to select all entries in marking mode.
+            case KeyCode.A when alt:
+                ShowCreateFileDialog();
+                return true;
+
             case KeyCode.T:
                 DuplicateTab?.Invoke();
                 return true;
@@ -1233,6 +1239,68 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
+    private void ShowCreateFileDialog()
+    {
+        string? name = null;
+
+        var textField = new TextField
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "New file (include extension)",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+
+        textField.Accepting += (_, e) =>
+        {
+            name = textField.Text ?? string.Empty;
+            e.Handled = true;
+            _app.RequestStop();
+        };
+
+        dialog.Add(textField);
+        textField.SetFocus();
+
+        RunDialog(dialog);
+
+        if (name is null)
+        {
+            return;
+        }
+
+        name = name.Trim();
+
+        if (name.Length == 0)
+        {
+            _controller.SetStatus("Create cancelled: name cannot be empty.");
+            return;
+        }
+
+        try
+        {
+            var fullPath = Path.Combine(_controller.CurrentDirectory, name);
+
+            // CreateNew fails if the file already exists, so no separate existence check is needed.
+            using (new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+            }
+
+            _controller.ReloadSelectingEntry(name);
+            _controller.SetStatus($"Created: {name}");
+        }
+        catch (Exception ex)
+        {
+            _controller.SetStatus($"Create failed: {ex.Message}");
+            Log.Warning(ex, "Failed to create file {Name} in {Directory}", name, _controller.CurrentDirectory);
+        }
+    }
+
     private void ShowExecuteDialog()
     {
         var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
@@ -1410,6 +1478,7 @@ internal sealed class FileManagerWindow : Window
             "",
             "  Ctrl+Alt shortcuts",
             "  Ctrl+Alt+F      Add current directory to favorites",
+            "  Ctrl+Alt+A      Create a new file here",
             "  Ctrl+Alt+I      Move selection up  (vim-style)",
             "  Ctrl+Alt+K      Move selection down  (vim-style)",
             "  Ctrl+Alt+J      Go to parent  (vim-style)",
