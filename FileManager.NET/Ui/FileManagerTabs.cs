@@ -161,15 +161,27 @@ internal sealed class FileManagerTabs : Window
     private void RestoreTabs(SessionState sessionState, string startDirectory)
     {
         FileManagerWindow? activePane = null;
+        FileManagerWindow? firstPane = null;
 
         for (int index = 0; index < sessionState.Directories.Count; index++)
         {
             var pane = OpenTab(sessionState.Directories[index], requireReachable: true);
+            if (pane is null)
+            {
+                continue;
+            }
+
+            firstPane ??= pane;
+
             if (index == sessionState.ActiveTabIndex)
             {
                 activePane = pane;
             }
         }
+
+        // The recorded active tab may have been skipped (unreachable path), so fall back to the
+        // first restored tab rather than leaving focus undefined.
+        activePane ??= firstPane;
 
         if (_tabs.TabCollection.Any())
         {

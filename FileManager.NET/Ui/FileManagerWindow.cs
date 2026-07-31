@@ -904,10 +904,29 @@ internal sealed class FileManagerWindow : Window
 
     private void ShowDrivesDialog()
     {
-        var drives = DriveInfo.GetDrives()
-            .Where(d => d.IsReady)
-            .Select(d => d.Name)
-            .ToList();
+        // Only ready drives are listed; the readiness probe is the expensive part (removable/network
+        // spin-up) and the size properties below are cheap once a drive answered it.
+        var drives = new List<string>();
+        var rows = new List<string>();
+
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                if (!drive.IsReady)
+                {
+                    continue;
+                }
+
+                drives.Add(drive.Name);
+                rows.Add(FormatDriveRow(drive));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // A drive can vanish or refuse access between the readiness probe and the size read.
+                Log.Warning(ex, "Skipping drive {Drive} while building the drive picker", drive.Name);
+            }
+        }
 
         if (drives.Count == 0)
         {
@@ -924,7 +943,7 @@ internal sealed class FileManagerWindow : Window
             Width = Dim.Fill(1),
             Height = Dim.Fill(3),
         };
-        listView.SetSource(new ObservableCollection<string>(drives));
+        listView.SetSource(new ObservableCollection<string>(rows));
 
         var dialog = new Dialog
         {
@@ -958,6 +977,23 @@ internal sealed class FileManagerWindow : Window
         {
             _controller.SetStatus($"Drive is not accessible: {chosen}");
         }
+    }
+
+    private static string FormatDriveRow(DriveInfo drive)
+    {
+        var total = drive.TotalSize;
+        var free = drive.TotalFreeSpace;
+        var label = string.IsNullOrWhiteSpace(drive.VolumeLabel) ? drive.DriveType.ToString() : drive.VolumeLabel;
+
+        if (total <= 0)
+        {
+            return $"{drive.Name,-4} {label,-16}";
+        }
+
+        const double GB = 1024d * 1024d * 1024d;
+        var percentFree = free * 100d / total;
+
+        return $"{drive.Name,-4} {label,-16} {free / GB,8:0.0} GB free of {total / GB,8:0.0} GB ({percentFree,3:0}% free)";
     }
 
     private void ShowFavoritesDialog()

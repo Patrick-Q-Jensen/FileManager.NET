@@ -32,9 +32,10 @@ internal sealed class SessionStateService
             return saved is null
                 ? SessionState.Empty
                 : new SessionState(
+                    // Duplicates are kept on purpose: several tabs may legitimately browse the
+                    // same directory, and de-duplicating here would silently drop those tabs.
                     saved.Directories
                         .Where(path => !string.IsNullOrWhiteSpace(path))
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
                         .Take(9)
                         .ToArray(),
                     saved.ActiveTabIndex);
