@@ -1128,8 +1128,8 @@ internal sealed class FileManagerWindow : Window
 
     private void ShowDeleteConfirmDialog()
     {
-        var entry = _controller.GetEntry(_listView.SelectedItem ?? -1);
-        if (entry is null || entry.Name == "..")
+        var entries = GetSelectedEntries(excludeParent: true);
+        if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to delete.");
             return;
@@ -1142,7 +1142,9 @@ internal sealed class FileManagerWindow : Window
             X = 1,
             Y = 1,
             Width = Dim.Fill(1),
-            Text = $"Delete \"{entry.Name}\"? Press Enter to confirm.",
+            Text = entries.Count == 1
+                ? $"Delete \"{entries[0].Name}\"? Press Enter to confirm."
+                : $"Are you sure you want to delete all {entries.Count} selected items? Press Enter to confirm.",
         };
 
         var dialog = new Dialog
@@ -1173,24 +1175,91 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        var deleted = 0;
+        string? firstFailure = null;
+        var failed = 0;
+
+        foreach (var entry in entries)
+        {
+            var skipReason = GetDeleteBlockReason(entry);
+            if (skipReason is not null)
+            {
+                failed++;
+                firstFailure ??= $"{entry.Name}: {skipReason}";
+                Log.Warning("Skipped delete of {Path}: {Reason}", entry.FullPath, skipReason);
+                continue;
+            }
+
+            try
+            {
+                if (entry.IsDirectory)
+                {
+                    Directory.Delete(entry.FullPath, recursive: true);
+                }
+                else
+                {
+                    File.Delete(entry.FullPath);
+                }
+
+                deleted++;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                failed++;
+                firstFailure ??= $"{entry.Name}: {ex.Message}";
+                Log.Warning(ex, "Failed to delete {Path}", entry.FullPath);
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                firstFailure ??= $"{entry.Name}: {ex.Message}";
+                Log.Error(ex, "Unexpected failure deleting {Path}", entry.FullPath);
+            }
+        }
+
+        _controller.SetStatus(failed == 0
+            ? deleted == 1 ? $"Deleted: {entries[0].Name}" : $"Deleted {deleted} items"
+            : $"Deleted {deleted}, skipped {failed} — {firstFailure}");
+
+        if (deleted > 0)
+        {
+            _controller.EnterDirectory(_controller.CurrentDirectory);
+        }
+    }
+
+    // Cheap pre-check so obvious blockers are reported without attempting a partial delete.
+    // A full "is it locked?" check would require opening every file (recursively for
+    // directories), which is far too costly for large selections — those failures are
+    // instead caught per item during the delete itself.
+    private static string? GetDeleteBlockReason(FileSystemEntry entry)
+    {
         try
         {
             if (entry.IsDirectory)
             {
-                Directory.Delete(entry.FullPath, recursive: true);
+                if (!Directory.Exists(entry.FullPath))
+                {
+                    return "no longer exists";
+                }
             }
             else
             {
-                File.Delete(entry.FullPath);
+                if (!File.Exists(entry.FullPath))
+                {
+                    return "no longer exists";
+                }
+
+                if ((File.GetAttributes(entry.FullPath) & FileAttributes.ReadOnly) != 0)
+                {
+                    return "read-only";
+                }
             }
 
-            _controller.SetStatus($"Deleted: {entry.Name}");
-            _controller.EnterDirectory(_controller.CurrentDirectory);
+            return null;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _controller.SetStatus($"Delete failed: {ex.Message}");
-            Log.Warning(ex, "Failed to delete {Path}", entry.FullPath);
+            return ex.Message;
         }
     }
 
@@ -1487,7 +1556,7 @@ internal sealed class FileManagerWindow : Window
             "  \u2192               Drill into directory",
             "  \u2190               Go to parent directory",
             "  Enter           Open file or directory",
-            "  Del             Delete selected item",
+            "  Del             Delete selected / marked items",
             "  Backspace       Edit the active filter",
             "  Esc             Clear filter  /  quit",
             "  F1 \u2013 F9         Switch to tab 1 \u2013 9",
