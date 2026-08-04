@@ -133,7 +133,7 @@ internal sealed class FileManagerTabs : Window
             controller.EnterDirectory(directory);
         }
 
-        var pane = new FileManagerWindow(_app, controller, _favoritesService, _sortSettingsService);
+        var pane = new FileManagerWindow(_app, controller, _favoritesService, _sortSettingsService, _fileLauncher);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.

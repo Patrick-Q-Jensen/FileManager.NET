@@ -41,6 +41,7 @@ internal sealed class FileManagerWindow : Window
     private readonly NavigationController _controller;
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
+    private readonly IFileLauncher _fileLauncher;
     private readonly ZipArchiveService _zipArchiveService = new();
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
@@ -82,12 +83,13 @@ internal sealed class FileManagerWindow : Window
     /// <summary>The directory currently displayed in this tab.</summary>
     internal string CurrentDirectory => _controller.CurrentDirectory;
 
-    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, ISortSettingsService sortSettingsService)
+    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, ISortSettingsService sortSettingsService, IFileLauncher fileLauncher)
     {
         _app = app;
         _controller = controller;
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
+        _fileLauncher = fileLauncher;
 
         _filterLabel = new Label
         {
@@ -1456,22 +1458,8 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = entry.FullPath,
-                Arguments = args,
-                UseShellExecute = true,
-            });
-
-            _controller.SetStatus($"Launched: {entry.Name}");
-        }
-        catch (Exception ex)
-        {
-            _controller.SetStatus($"Launch failed: {ex.Message}");
-            Log.Warning(ex, "Failed to launch {Path} with args {Args}", entry.FullPath, args);
-        }
+        var error = _fileLauncher.Open(entry.FullPath, args);
+        _controller.SetStatus(error ?? $"Launched: {entry.Name}");
     }
 
     private void ShowRunCommandDialog()
@@ -1582,12 +1570,8 @@ internal sealed class FileManagerWindow : Window
             }
             else if (File.Exists(fullPath))
             {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = fullPath,
-                    UseShellExecute = true,
-                });
-                _controller.SetStatus($"Opened: {Path.GetFileName(fullPath)}");
+                var error = _fileLauncher.Open(fullPath);
+                _controller.SetStatus(error ?? $"Opened: {Path.GetFileName(fullPath)}");
             }
             else
             {

@@ -7,8 +7,9 @@ namespace FileManager.NET.Platform;
 internal interface IFileLauncher
 {
     /// <summary>
-    /// Opens <paramref name="path"/> with its associated application. Returns an error message
-    /// on failure, or <see langword="null"/> on success.
+    /// Opens <paramref name="path"/> with its associated application, optionally passing
+    /// <paramref name="arguments"/> when the path is itself an executable. Returns an error
+    /// message on failure, or <see langword="null"/> on success.
     /// </summary>
-    string? Open(string path);
+    string? Open(string path, string? arguments = null);
 }
