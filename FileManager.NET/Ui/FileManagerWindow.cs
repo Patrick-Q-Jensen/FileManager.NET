@@ -310,6 +310,12 @@ internal sealed class FileManagerWindow : Window
                 PasteFromClipboard();
                 return true;
 
+            // Ctrl+Alt+X runs an arbitrary command line in the current directory (git, copilot, ...),
+            // whereas plain Ctrl+X executes the selected entry itself.
+            case KeyCode.X when alt:
+                ShowRunCommandDialog();
+                return true;
+
             case KeyCode.X:
                 ShowExecuteDialog();
                 return true;
@@ -1468,6 +1474,56 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
+    private void ShowRunCommandDialog()
+    {
+        string? command = null;
+
+        var textField = new TextField
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+        };
+
+        var dialog = new Dialog
+        {
+            Title = $"Run in: {_controller.CurrentDirectory}",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+
+        // See ShowDrivesDialog: confirm via the TextField's Accept command (Enter); cancel via the
+        // Dialog's built-in Esc handling.
+        textField.Accepting += (_, e) =>
+        {
+            command = textField.Text ?? string.Empty;
+            e.Handled = true;
+            _app.RequestStop();
+        };
+
+        dialog.Add(textField);
+        textField.SetFocus();
+
+        RunDialog(dialog);
+
+        if (command is null)
+        {
+            return;
+        }
+
+        command = command.Trim();
+
+        if (command.Length == 0)
+        {
+            _controller.SetStatus("Run cancelled: command cannot be empty.");
+            return;
+        }
+
+        var error = WindowsCommandRunner.Run(command, _controller.CurrentDirectory);
+
+        _controller.SetStatus(error ?? $"Running: {command}");
+    }
+
     private void ShowMoveToDialog()
     {
         string? input = null;
@@ -1588,6 +1644,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+Alt+K      Move selection down  (vim-style)",
             "  Ctrl+Alt+J      Go to parent  (vim-style)",
             "  Ctrl+Alt+L      Drill into directory  (vim-style)",
+            "  Ctrl+Alt+X      Run a command in the current directory",
             "  Ctrl+Alt+P      Show Windows Properties dialog",
             "  Ctrl+Alt+O      Set global sort order",
         };
