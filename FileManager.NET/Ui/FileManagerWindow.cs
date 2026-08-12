@@ -33,6 +33,13 @@ internal sealed class FileManagerWindow : Window
     // feature, not a live filesystem watch.
     private static readonly TimeSpan AutoRefreshInterval = TimeSpan.FromSeconds(10);
 
+    private static readonly HashSet<string> ReservedWindowsNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
     // Set by the host (FileManagerTabs) to keep all tab headers the same width. Defaults to 20
     // until the host computes the available-width-divided-by-tab-count value.
     internal int TabTitleWidth { get; set; } = 20;
@@ -304,6 +311,10 @@ internal sealed class FileManagerWindow : Window
                 CopySelectedNameToClipboard();
                 return true;
 
+            case KeyCode.C when alt:
+                ShowCreateFileDialog();
+                return true;
+
             case KeyCode.C:
                 CopySelectedItemToClipboard();
                 return true;
@@ -332,12 +343,6 @@ internal sealed class FileManagerWindow : Window
 
             case KeyCode.R:
                 ShowRenameDialog();
-                return true;
-
-            // Ctrl+Alt+A creates a new file. Plain Ctrl+A was ruled out because the entry list
-            // already uses it to select all entries in marking mode.
-            case KeyCode.A when alt:
-                ShowCreateFileDialog();
                 return true;
 
             case KeyCode.T:
@@ -1365,7 +1370,7 @@ internal sealed class FileManagerWindow : Window
 
         var dialog = new Dialog
         {
-            Title = "New file (include extension)",
+            Title = "New file or folder (end folders with /)",
             Width = Dim.Percent(70),
             Height = 7,
         };
@@ -1388,6 +1393,12 @@ internal sealed class FileManagerWindow : Window
         }
 
         name = name.Trim();
+        var createDirectory = name.EndsWith('/');
+
+        if (createDirectory)
+        {
+            name = name[..^1];
+        }
 
         if (name.Length == 0)
         {
@@ -1395,23 +1406,81 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        if (createDirectory && !TryValidateWindowsFolderName(name, out var validationError))
+        {
+            _controller.SetStatus($"Create cancelled: {validationError}");
+            return;
+        }
+
         try
         {
             var fullPath = Path.Combine(_controller.CurrentDirectory, name);
 
-            // CreateNew fails if the file already exists, so no separate existence check is needed.
-            using (new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            if (createDirectory)
             {
+                if (Directory.Exists(fullPath))
+                {
+                    _controller.SetStatus($"Create cancelled: folder already exists: {name}");
+                    return;
+                }
+
+                Directory.CreateDirectory(fullPath);
+            }
+            else
+            {
+                // CreateNew fails if the file already exists, so no separate existence check is needed.
+                using (new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                }
             }
 
             _controller.ReloadSelectingEntry(name);
-            _controller.SetStatus($"Created: {name}");
+            _controller.SetStatus($"Created {(createDirectory ? "folder" : "file")}: {name}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            _controller.SetStatus($"Create failed: {ex.Message}");
+            Log.Warning(ex, "Failed to create {EntryType} {Name} in {Directory}",
+                createDirectory ? "folder" : "file", name, _controller.CurrentDirectory);
         }
         catch (Exception ex)
         {
             _controller.SetStatus($"Create failed: {ex.Message}");
-            Log.Warning(ex, "Failed to create file {Name} in {Directory}", name, _controller.CurrentDirectory);
+            Log.Error(ex, "Unexpected failure creating {EntryType} {Name} in {Directory}",
+                createDirectory ? "folder" : "file", name, _controller.CurrentDirectory);
         }
+    }
+
+    private static bool TryValidateWindowsFolderName(string name, out string error)
+    {
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            error = "folder name contains a character that Windows does not allow.";
+            return false;
+        }
+
+        if (name.EndsWith(' ') || name.EndsWith('.'))
+        {
+            error = "folder name cannot end with a space or period.";
+            return false;
+        }
+
+        if (name is "." or "..")
+        {
+            error = "folder name cannot be '.' or '..'.";
+            return false;
+        }
+
+        var extensionIndex = name.IndexOf('.');
+        var nameWithoutExtension = extensionIndex >= 0 ? name[..extensionIndex] : name;
+        if (ReservedWindowsNames.Contains(nameWithoutExtension))
+        {
+            error = $"'{nameWithoutExtension}' is a reserved Windows name.";
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
     }
 
     private void ShowExecuteDialog()
@@ -1623,7 +1692,7 @@ internal sealed class FileManagerWindow : Window
             "",
             "  Ctrl+Alt shortcuts",
             "  Ctrl+Alt+F      Add current directory to favorites",
-            "  Ctrl+Alt+A      Create a new file here",
+            "  Ctrl+Alt+C      Create a file or folder here",
             "  Ctrl+Alt+I      Move selection up  (vim-style)",
             "  Ctrl+Alt+K      Move selection down  (vim-style)",
             "  Ctrl+Alt+J      Go to parent  (vim-style)",
@@ -1868,4 +1937,3 @@ internal static class NativeMethods
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern bool SHObjectProperties(IntPtr hwnd, uint shopObjectType, string pszObject, string? pszPage);
 }
-
