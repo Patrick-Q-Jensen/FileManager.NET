@@ -766,6 +766,11 @@ internal sealed class FileManagerWindow : Window
         }
 
         var destinationDirectory = _controller.CurrentDirectory;
+        var archiveFileName = PromptForZipArchiveName(entries[0].Name, destinationDirectory);
+        if (archiveFileName is null)
+        {
+            return;
+        }
 
         var statusLabel = new Label
         {
@@ -812,7 +817,11 @@ internal sealed class FileManagerWindow : Window
             dialog.SetNeedsDraw();
         }));
 
-        _ = Task.Run(() => _zipArchiveService.Create(entries.ToArray(), destinationDirectory, progress))
+        _ = Task.Run(() => _zipArchiveService.Create(
+                entries.ToArray(),
+                destinationDirectory,
+                archiveFileName,
+                progress))
             .ContinueWith(task =>
             {
                 _app.Invoke(() =>
@@ -858,6 +867,74 @@ internal sealed class FileManagerWindow : Window
         _controller.SetStatus(result.Errors.Count == 0
             ? $"Created: {Path.GetFileName(result.ArchivePath)} ({result.FilesAdded} files)"
             : $"Created {Path.GetFileName(result.ArchivePath)}: {result.FilesAdded} files, {result.Errors.Count} skipped.");
+    }
+
+    private string? PromptForZipArchiveName(string firstEntryName, string destinationDirectory)
+    {
+        string? archiveFileName = null;
+        var baseName = Path.GetFileNameWithoutExtension(firstEntryName);
+        if (string.IsNullOrWhiteSpace(baseName))
+        {
+            baseName = "Archive";
+        }
+
+        var textField = new TextField
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = $"{baseName}.zip",
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "ZIP Archive Name",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+
+        textField.Accepting += (_, e) =>
+        {
+            archiveFileName = textField.Text ?? string.Empty;
+            e.Handled = true;
+            _app.RequestStop();
+        };
+
+        dialog.Add(textField);
+        textField.SetFocus();
+        RunDialog(dialog);
+
+        if (archiveFileName is null)
+        {
+            return null;
+        }
+
+        archiveFileName = archiveFileName.Trim();
+        if (archiveFileName.Length == 0)
+        {
+            _controller.SetStatus("Archive creation cancelled: name cannot be empty.");
+            return null;
+        }
+
+        if (!archiveFileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            archiveFileName += ".zip";
+        }
+
+        if (!TryValidateWindowsEntryName(archiveFileName, out var validationError))
+        {
+            _controller.SetStatus($"Archive creation cancelled: {validationError}");
+            return null;
+        }
+
+        var archivePath = Path.Combine(destinationDirectory, archiveFileName);
+        if (File.Exists(archivePath) || Directory.Exists(archivePath))
+        {
+            _controller.SetStatus($"Archive creation cancelled: '{archiveFileName}' already exists.");
+            return null;
+        }
+
+        return archiveFileName;
     }
 
     private void PasteFromClipboard()
@@ -1659,7 +1736,7 @@ internal sealed class FileManagerWindow : Window
 
         if (entry.IsArchiveEntry)
         {
-            if (!TryValidateWindowsFolderName(newName, out var validationError))
+            if (!TryValidateWindowsEntryName(newName, out var validationError))
             {
                 _controller.SetStatus($"Rename cancelled: {validationError}");
                 return;
@@ -1774,7 +1851,7 @@ internal sealed class FileManagerWindow : Window
 
         if (_controller.IsArchive)
         {
-            if (!TryValidateWindowsFolderName(name, out var archiveValidationError))
+            if (!TryValidateWindowsEntryName(name, out var archiveValidationError))
             {
                 _controller.SetStatus($"Create cancelled: {archiveValidationError}");
                 return;
@@ -1818,7 +1895,7 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        if (createDirectory && !TryValidateWindowsFolderName(name, out var validationError))
+        if (createDirectory && !TryValidateWindowsEntryName(name, out var validationError))
         {
             _controller.SetStatus($"Create cancelled: {validationError}");
             return;
@@ -1863,23 +1940,23 @@ internal sealed class FileManagerWindow : Window
         }
     }
 
-    private static bool TryValidateWindowsFolderName(string name, out string error)
+    private static bool TryValidateWindowsEntryName(string name, out string error)
     {
         if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
         {
-            error = "folder name contains a character that Windows does not allow.";
+            error = "name contains a character that Windows does not allow.";
             return false;
         }
 
         if (name.EndsWith(' ') || name.EndsWith('.'))
         {
-            error = "folder name cannot end with a space or period.";
+            error = "name cannot end with a space or period.";
             return false;
         }
 
         if (name is "." or "..")
         {
-            error = "folder name cannot be '.' or '..'.";
+            error = "name cannot be '.' or '..'.";
             return false;
         }
 

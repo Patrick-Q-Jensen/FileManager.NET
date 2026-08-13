@@ -323,10 +323,12 @@ internal sealed class ZipArchiveService
     public ZipArchiveResult Create(
         IReadOnlyList<FileSystemEntry> entries,
         string destinationDirectory,
+        string archiveFileName,
         IProgress<ZipArchiveProgress>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(archiveFileName);
 
         var errors = new List<string>();
         var sources = CollectSources(entries, errors);
@@ -338,7 +340,7 @@ internal sealed class ZipArchiveService
         string archivePath;
         try
         {
-            archivePath = GetUniqueArchivePath(destinationDirectory, entries[0].Name);
+            archivePath = Path.Combine(destinationDirectory, archiveFileName);
         }
         catch (Exception ex)
         {
@@ -348,9 +350,11 @@ internal sealed class ZipArchiveService
 
         var filesAdded = 0;
         var filesProcessed = 0;
+        var archiveCreated = false;
         try
         {
             using var archiveStream = new FileStream(archivePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            archiveCreated = true;
             using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create);
 
             foreach (var source in sources)
@@ -385,7 +389,11 @@ internal sealed class ZipArchiveService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
         {
             Log.Warning(ex, "Failed to create ZIP archive {ArchivePath}", archivePath);
-            TryDeleteIncompleteArchive(archivePath);
+            if (archiveCreated)
+            {
+                TryDeleteIncompleteArchive(archivePath);
+            }
+
             return new ZipArchiveResult(null, filesAdded, [.. errors, ex.Message]);
         }
 
@@ -481,25 +489,6 @@ internal sealed class ZipArchiveService
         using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         using var destination = entry.Open();
         source.CopyTo(destination);
-    }
-
-    private static string GetUniqueArchivePath(string directory, string firstEntryName)
-    {
-        var baseName = Path.GetFileNameWithoutExtension(firstEntryName);
-        if (string.IsNullOrWhiteSpace(baseName))
-        {
-            baseName = "Archive";
-        }
-
-        for (var suffix = 1; ; suffix++)
-        {
-            var name = suffix == 1 ? $"{baseName}.zip" : $"{baseName} ({suffix}).zip";
-            var path = Path.Combine(directory, name);
-            if (!File.Exists(path) && !Directory.Exists(path))
-            {
-                return path;
-            }
-        }
     }
 
     private static string EnsureDirectoryEntryName(string entryName) => $"{entryName.TrimEnd('/')}/";
