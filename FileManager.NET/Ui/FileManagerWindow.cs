@@ -625,7 +625,7 @@ internal sealed class FileManagerWindow : Window
         };
         dialog.KeyDown += (_, key) =>
         {
-            if (key.KeyCode == KeyCode.Esc)
+            if (key.KeyCode is KeyCode.Esc or KeyCode.Enter)
             {
                 key.Handled = true;
             }
@@ -640,25 +640,30 @@ internal sealed class FileManagerWindow : Window
             const int barWidth = 32;
             var filled = percent * barWidth / 100;
             progressLabel.Text = $"[{new string('#', filled)}{new string('-', barWidth - filled)}] {percent,3}%  {update.FilesProcessed}/{update.TotalFiles} files";
-            statusLabel.Text = "Compressing files…";
+            statusLabel.Text = update.FilesProcessed == update.TotalFiles
+                ? "Finalizing archive…"
+                : "Compressing files…";
             dialog.SetNeedsDraw();
         }));
 
         _ = Task.Run(() => _zipArchiveService.Create(entries.ToArray(), destinationDirectory, progress))
             .ContinueWith(task =>
             {
-                if (task.IsCompletedSuccessfully)
+                _app.Invoke(() =>
                 {
-                    result = task.Result;
-                }
-                else
-                {
-                    failure = task.Exception?.GetBaseException().Message ?? "An unexpected error occurred.";
-                    Log.Error(task.Exception, "ZIP archive creation failed unexpectedly");
-                }
+                    if (task.IsCompletedSuccessfully)
+                    {
+                        result = task.Result;
+                    }
+                    else
+                    {
+                        failure = task.Exception?.GetBaseException().Message ?? "An unexpected error occurred.";
+                        Log.Error(task.Exception, "ZIP archive creation failed unexpectedly");
+                    }
 
-                _app.RequestStop();
-            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());
+                    _app.RequestStop(dialog);
+                });
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
 
         RunDialog(dialog);
 
