@@ -11,7 +11,8 @@ internal sealed record FileSystemEntry(
     long Size,
     DateTime LastModified,
     FileAttributes Attributes,
-    string? ArchiveEntryPath = null)
+    string? ArchiveEntryPath = null,
+    string? RelativeParentPath = null)
 {
     public bool IsArchiveEntry => ArchiveEntryPath is not null;
 

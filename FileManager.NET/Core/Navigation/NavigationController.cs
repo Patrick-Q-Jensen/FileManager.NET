@@ -20,6 +20,8 @@ internal sealed class NavigationController
     private readonly ISortSettingsService _sortSettings;
     private readonly ZipArchiveService _zipArchiveService;
     private readonly NavigationState _state = new();
+    private List<FileSystemEntry>? _flattenEntries;
+    private bool _flattenEntriesPublished;
 
     // Null means "follow the global default"; set by SetLocalSortMode (Ctrl+O) to override it
     // for just this pane.
@@ -71,6 +73,10 @@ internal sealed class NavigationController
     public string DisplayPath => _state.Location.DisplayPath;
 
     public bool IsArchive => _state.Location.IsArchive;
+
+    public bool IsFlattened { get; private set; }
+
+    public bool IsFlattening { get; private set; }
 
     public string Query => _state.Query;
 
@@ -164,6 +170,7 @@ internal sealed class NavigationController
 
     private void ApplyListing(NavigationLocation location, DirectoryListing listing)
     {
+        ResetFlattenState();
         _state.Location = location;
         _state.AllEntries = listing.Entries.ToList();
         _state.Query = string.Empty;
@@ -318,9 +325,104 @@ internal sealed class NavigationController
             return;
         }
 
+        ResetFlattenState();
         _state.AllEntries = listing.Entries.ToList();
         ApplyFilter();
         Changed?.Invoke();
+    }
+
+    /// <summary>Starts a progressively populated flattened view of the current directory tree.</summary>
+    public bool BeginFlatten()
+    {
+        if (_state.Location.IsArchive)
+        {
+            _state.StatusMessage = "Flattening ZIP archive views is not supported.";
+            Changed?.Invoke();
+            return false;
+        }
+
+        IsFlattened = true;
+        IsFlattening = true;
+        _flattenEntries = [];
+        _flattenEntriesPublished = false;
+        _state.StatusMessage = "Flattening... 0 items found";
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>Adds one worker batch to the active flattened view.</summary>
+    public void AppendFlattenBatch(IReadOnlyList<FileSystemEntry> entries)
+    {
+        if (!IsFlattening || entries.Count == 0 || _flattenEntries is null)
+        {
+            return;
+        }
+
+        _flattenEntries.AddRange(entries);
+        _state.AllEntries = _flattenEntries;
+        _flattenEntriesPublished = true;
+        _state.StatusMessage = $"Flattening... {_flattenEntries.Count:N0} items found";
+        ApplyFilter();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Finishes the active flattened view and reports any paths that were skipped.</summary>
+    public void CompleteFlatten(DirectoryTreeResult result)
+    {
+        if (!IsFlattening || _flattenEntries is null)
+        {
+            return;
+        }
+
+        PublishEmptyFlattenViewIfNeeded();
+        IsFlattening = false;
+        _state.StatusMessage = result.PathsSkipped == 0
+            ? $"Flattened {result.EntriesFound:N0} items. Ctrl+E to restore."
+            : $"Flattened {result.EntriesFound:N0} items; {result.PathsSkipped:N0} paths skipped. Ctrl+E to restore.";
+        Changed?.Invoke();
+    }
+
+    /// <summary>Keeps any entries already found while surfacing an unexpected flattening failure.</summary>
+    public void FailFlatten(string message)
+    {
+        if (!IsFlattening || _flattenEntries is null)
+        {
+            return;
+        }
+
+        PublishEmptyFlattenViewIfNeeded();
+        IsFlattening = false;
+        _state.StatusMessage = $"Flattening stopped: {message}";
+        Changed?.Invoke();
+    }
+
+    /// <summary>Restores the ordinary listing for the current directory.</summary>
+    public void ExitFlatten()
+    {
+        if (IsFlattened)
+        {
+            LoadLocation(_state.Location);
+        }
+    }
+
+    private void PublishEmptyFlattenViewIfNeeded()
+    {
+        if (_flattenEntriesPublished || _flattenEntries is null)
+        {
+            return;
+        }
+
+        _state.AllEntries = _flattenEntries;
+        _flattenEntriesPublished = true;
+        ApplyFilter();
+    }
+
+    private void ResetFlattenState()
+    {
+        IsFlattened = false;
+        IsFlattening = false;
+        _flattenEntries = null;
+        _flattenEntriesPublished = false;
     }
 
     // Order-independent comparison: enumeration order can vary between passes even when

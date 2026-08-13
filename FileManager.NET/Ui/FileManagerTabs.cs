@@ -150,6 +150,7 @@ internal sealed class FileManagerTabs : Window
         var pane = new FileManagerWindow(
             _app,
             controller,
+            _directoryService,
             _favoritesService,
             _sortSettingsService,
             _fileLauncher,

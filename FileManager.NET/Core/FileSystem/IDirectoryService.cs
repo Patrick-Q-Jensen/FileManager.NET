@@ -6,6 +6,9 @@ namespace FileManager.NET.Core.FileSystem;
 /// </summary>
 internal sealed record DirectoryListing(IReadOnlyList<FileSystemEntry> Entries, string? Error);
 
+/// <summary>The outcome of recursively enumerating a directory tree.</summary>
+internal sealed record DirectoryTreeResult(int EntriesFound, int PathsSkipped);
+
 /// <summary>
 /// Loads directory contents for the file manager. Kept behind an interface so it can be
 /// swapped later for asynchronous loading or virtual file systems (archives, remote shares)
@@ -15,4 +18,13 @@ internal interface IDirectoryService
 {
     /// <summary>Loads the entries of <paramref name="path"/> in a single metadata pass.</summary>
     DirectoryListing Load(string path);
+
+    /// <summary>
+    /// Recursively enumerates descendants of <paramref name="path"/> and publishes bounded
+    /// batches. Reparse-point directories are listed but not traversed.
+    /// </summary>
+    DirectoryTreeResult EnumerateTree(
+        string path,
+        Action<IReadOnlyList<FileSystemEntry>> publishBatch,
+        CancellationToken cancellationToken);
 }

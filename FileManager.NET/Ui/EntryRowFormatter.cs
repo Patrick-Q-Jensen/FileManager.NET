@@ -43,6 +43,11 @@ internal static class EntryRowFormatter
         foreach (var entry in entries)
         {
             var length = entry.IsDirectory ? entry.Name.Length + 1 : entry.Name.Length;
+            if (entry.RelativeParentPath is not null)
+            {
+                length += entry.RelativeParentPath.Length + 4;
+            }
+
             if (length > width)
             {
                 width = length;
@@ -58,6 +63,11 @@ internal static class EntryRowFormatter
     public static string Format(FileSystemEntry entry, int nameColumnWidth)
     {
         var name = entry.IsDirectory ? entry.Name + "/" : entry.Name;
+        if (entry.RelativeParentPath is not null)
+        {
+            name += $" > {entry.RelativeParentPath}/";
+        }
+
         var modified = entry.LastModified == default ? string.Empty : entry.LastModified.ToString(DateFormat);
         var (sizeNumber, sizeUnit) = entry.IsDirectory ? (string.Empty, string.Empty) : FormatSize(entry.Size);
         var gap = new string(' ', DateSizeGap);

@@ -19,7 +19,8 @@ internal sealed class SubstringEntryFilter : IEntryFilter
         for (var i = 0; i < source.Count; i++)
         {
             var entry = source[i];
-            if (entry.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+            if (entry.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || entry.RelativeParentPath?.Contains(query, StringComparison.OrdinalIgnoreCase) == true)
             {
                 matches.Add(entry);
             }

@@ -27,6 +27,7 @@ internal sealed class FileManagerWindow : Window
 {
     // Upper bound for the path portion of the title before its leading segments are elided.
     private const int MaxPathTitleLength = 48;
+    private static readonly TimeSpan FlattenRefreshInterval = TimeSpan.FromMilliseconds(100);
 
     // How often the current directory is silently re-checked for external changes (files added,
     // removed, or renamed by another process). Kept fairly relaxed since this is a convenience
@@ -46,6 +47,7 @@ internal sealed class FileManagerWindow : Window
 
     private readonly IApplication _app;
     private readonly NavigationController _controller;
+    private readonly IDirectoryService _directoryService;
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
     private readonly IFileLauncher _fileLauncher;
@@ -65,6 +67,8 @@ internal sealed class FileManagerWindow : Window
     // Token for the periodic auto-refresh timeout, used to unregister it on disposal.
     private object? _autoRefreshToken;
     private bool _archiveRefreshRunning;
+    private FlattenOperation? _flattenOperation;
+    private object? _flattenRefreshToken;
 
     /// <summary>
     /// Raised when this tab has navigated to a different directory (and therefore its tab header
@@ -96,6 +100,7 @@ internal sealed class FileManagerWindow : Window
     public FileManagerWindow(
         IApplication app,
         NavigationController controller,
+        IDirectoryService directoryService,
         IFavoritesService favoritesService,
         ISortSettingsService sortSettingsService,
         IFileLauncher fileLauncher,
@@ -103,6 +108,7 @@ internal sealed class FileManagerWindow : Window
     {
         _app = app;
         _controller = controller;
+        _directoryService = directoryService;
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
         _fileLauncher = fileLauncher;
@@ -158,6 +164,11 @@ internal sealed class FileManagerWindow : Window
     // controller/views directly. Returning true keeps the timer repeating.
     private bool OnAutoRefreshTimer()
     {
+        if (_controller.IsFlattened)
+        {
+            return true;
+        }
+
         if (_controller.IsArchive)
         {
             BeginArchiveAutoRefresh();
@@ -222,10 +233,17 @@ internal sealed class FileManagerWindow : Window
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing && _autoRefreshToken is not null)
+        if (disposing)
         {
-            _app.RemoveTimeout(_autoRefreshToken);
-            _autoRefreshToken = null;
+            StopFlattenOperation();
+            _controller.Changed -= Refresh;
+            _favoritesService.ErrorOccurred -= OnFavoritesError;
+
+            if (_autoRefreshToken is not null)
+            {
+                _app.RemoveTimeout(_autoRefreshToken);
+                _autoRefreshToken = null;
+            }
         }
 
         base.Dispose(disposing);
@@ -395,6 +413,10 @@ internal sealed class FileManagerWindow : Window
                 ShowDrivesDialog();
                 return true;
 
+            case KeyCode.E when !alt:
+                ToggleFlattenedView();
+                return true;
+
             case KeyCode.R:
                 ShowRenameDialog();
                 return true;
@@ -472,6 +494,172 @@ internal sealed class FileManagerWindow : Window
         _listView.ShowMarks = !_listView.ShowMarks;
         _controller.SetStatus(_listView.ShowMarks ? "Marking mode on (Space to select)" : "Marking mode off");
         SetNeedsDraw();
+    }
+
+    private void ToggleFlattenedView()
+    {
+        if (_controller.IsFlattened)
+        {
+            StopFlattenOperation();
+
+            try
+            {
+                _controller.ExitFlatten();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to restore directory view for {Directory}", _controller.CurrentDirectory);
+                _controller.SetStatus($"Could not restore directory view: {ex.Message}");
+            }
+
+            return;
+        }
+
+        if (!_controller.BeginFlatten())
+        {
+            return;
+        }
+
+        var operation = new FlattenOperation();
+        _flattenOperation = operation;
+        _flattenRefreshToken = _app.AddTimeout(
+            FlattenRefreshInterval,
+            () => PublishFlattenProgress(operation));
+        var rootPath = _controller.CurrentDirectory;
+
+        _ = Task.Run(() => RunFlattenWorker(operation, rootPath));
+    }
+
+    private void RunFlattenWorker(FlattenOperation operation, string rootPath)
+    {
+        try
+        {
+            var result = _directoryService.EnumerateTree(
+                rootPath,
+                batch =>
+                {
+                    lock (operation.SyncRoot)
+                    {
+                        operation.PendingEntries.AddRange(batch);
+                    }
+                },
+                operation.Cancellation.Token);
+
+            lock (operation.SyncRoot)
+            {
+                operation.Result = result;
+            }
+        }
+        catch (OperationCanceledException) when (operation.Cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            lock (operation.SyncRoot)
+            {
+                operation.Error = ex;
+            }
+        }
+        finally
+        {
+            bool disposeCancellation;
+            lock (operation.SyncRoot)
+            {
+                operation.Completed = true;
+                disposeCancellation = operation.Abandoned;
+            }
+
+            if (disposeCancellation)
+            {
+                operation.Cancellation.Dispose();
+            }
+        }
+    }
+
+    private bool PublishFlattenProgress(FlattenOperation operation)
+    {
+        if (!ReferenceEquals(operation, _flattenOperation))
+        {
+            return false;
+        }
+
+        FileSystemEntry[] pendingEntries;
+        DirectoryTreeResult? result;
+        Exception? error;
+        bool completed;
+
+        lock (operation.SyncRoot)
+        {
+            pendingEntries = operation.PendingEntries.ToArray();
+            operation.PendingEntries.Clear();
+            result = operation.Result;
+            error = operation.Error;
+            completed = operation.Completed;
+        }
+
+        if (pendingEntries.Length > 0)
+        {
+            _controller.AppendFlattenBatch(pendingEntries);
+        }
+
+        if (!completed)
+        {
+            return true;
+        }
+
+        _flattenOperation = null;
+        _flattenRefreshToken = null;
+        ReleaseFlattenOperation(operation, cancel: false);
+
+        if (error is not null)
+        {
+            Log.Error(error, "Unexpected failure flattening directory {Directory}", _controller.CurrentDirectory);
+            _controller.FailFlatten(error.Message);
+        }
+        else if (result is not null)
+        {
+            _controller.CompleteFlatten(result);
+        }
+
+        return false;
+    }
+
+    private void StopFlattenOperation()
+    {
+        var operation = _flattenOperation;
+        if (operation is null)
+        {
+            return;
+        }
+
+        _flattenOperation = null;
+        if (_flattenRefreshToken is not null)
+        {
+            _app.RemoveTimeout(_flattenRefreshToken);
+            _flattenRefreshToken = null;
+        }
+
+        ReleaseFlattenOperation(operation, cancel: true);
+    }
+
+    private static void ReleaseFlattenOperation(FlattenOperation operation, bool cancel)
+    {
+        bool disposeCancellation;
+        lock (operation.SyncRoot)
+        {
+            operation.Abandoned = true;
+            if (cancel && !operation.Completed)
+            {
+                operation.Cancellation.Cancel();
+            }
+
+            disposeCancellation = operation.Completed;
+        }
+
+        if (disposeCancellation)
+        {
+            operation.Cancellation.Dispose();
+        }
     }
 
     private void MoveSelection(int delta)
@@ -2181,6 +2369,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+Z          Create ZIP archive from selected items",
             "  Ctrl+B          Toggle marking mode (hint ctrl+A will select all, ctrl+u will unselect all)",
             "  Ctrl+D          Show drive picker",
+            "  Ctrl+E          Toggle flattened directory view",
             "  Ctrl+F          Show favorites",
             "  Ctrl+G          Go to path",
             "  Ctrl+O          Set sort order (this tab)",
@@ -2230,6 +2419,11 @@ internal sealed class FileManagerWindow : Window
 
     private void Refresh()
     {
+        if (!_controller.IsFlattened)
+        {
+            StopFlattenOperation();
+        }
+
         var entries = _controller.FilteredEntries;
 
         // Only rebuild the list source and reset the selection when the entry set actually
@@ -2426,6 +2620,17 @@ internal sealed class FileManagerWindow : Window
     }
 
     private enum ConflictChoice { None, Replace, Duplicate }
+
+    private sealed class FlattenOperation
+    {
+        public object SyncRoot { get; } = new();
+        public CancellationTokenSource Cancellation { get; } = new();
+        public List<FileSystemEntry> PendingEntries { get; } = [];
+        public DirectoryTreeResult? Result { get; set; }
+        public Exception? Error { get; set; }
+        public bool Completed { get; set; }
+        public bool Abandoned { get; set; }
+    }
 }
 
 // P/Invoke wrapper for the shell's "Properties" dialog, used by Ctrl+Alt+P. Delegates entirely
