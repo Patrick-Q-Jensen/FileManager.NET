@@ -9,7 +9,8 @@ namespace FileManager.NET.Core.Navigation;
 /// </summary>
 internal sealed class NavigationState
 {
-    public string CurrentDirectory { get; set; } = string.Empty;
+    public NavigationLocation Location { get; set; } =
+        NavigationLocation.Directory(Environment.CurrentDirectory);
 
     public string Query { get; set; } = string.Empty;
 

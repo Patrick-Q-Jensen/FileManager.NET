@@ -8,6 +8,318 @@ namespace FileManager.NET.Core.FileSystem;
 /// </summary>
 internal sealed class ZipArchiveService
 {
+    private static readonly string ExtractionRoot =
+        Path.Combine(Path.GetTempPath(), "FileManager.NET", "Extracted");
+
+    private readonly object _indexLock = new();
+    private readonly Dictionary<string, CachedArchiveIndex> _indexCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public ZipArchiveService()
+    {
+        CleanupOldExtractions();
+    }
+
+    public DirectoryListing LoadDirectory(string archivePath, string archiveDirectory)
+    {
+        try
+        {
+            var file = new FileInfo(archivePath);
+            if (!file.Exists)
+            {
+                return new DirectoryListing([], $"Archive not found: {archivePath}");
+            }
+
+            var index = GetOrBuildIndex(file);
+            var directory = archiveDirectory.Trim('/');
+            if (!index.Children.TryGetValue(directory, out var children))
+            {
+                return new DirectoryListing([], $"Archive directory not found: {directory}");
+            }
+
+            var entries = new List<FileSystemEntry>(children.Count);
+            foreach (var child in children)
+            {
+                entries.Add(new FileSystemEntry(
+                    child.Name,
+                    archivePath,
+                    child.IsDirectory,
+                    child.Size,
+                    child.LastModified,
+                    child.IsDirectory ? FileAttributes.Directory : FileAttributes.Normal,
+                    child.Path));
+            }
+
+            return new DirectoryListing(entries, null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
+        {
+            Log.Warning(ex, "Failed to browse ZIP archive {ArchivePath}", archivePath);
+            return new DirectoryListing([], $"Cannot open archive: {ex.Message}");
+        }
+    }
+
+    public void Invalidate(string archivePath)
+    {
+        lock (_indexLock)
+        {
+            _indexCache.Remove(archivePath);
+        }
+    }
+
+    public ZipExtractionResult ExtractEntries(IReadOnlyList<FileSystemEntry> entries)
+    {
+        if (entries.Count == 0)
+        {
+            return new ZipExtractionResult([], ["Nothing selected to extract."]);
+        }
+
+        var archivePath = entries[0].FullPath;
+        if (entries.Any(entry => !entry.IsArchiveEntry
+                                 || !string.Equals(entry.FullPath, archivePath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new ZipExtractionResult([], ["Archive extraction requires entries from one ZIP file."]);
+        }
+
+        var destinationRoot = Path.Combine(ExtractionRoot, Guid.NewGuid().ToString("N"));
+        var extractedPaths = new List<string>(entries.Count);
+        var errors = new List<string>();
+
+        try
+        {
+            Directory.CreateDirectory(destinationRoot);
+            using var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+
+            var archiveEntries = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var archiveEntry in archive.Entries)
+            {
+                if (TryNormalizeArchivePath(archiveEntry.FullName, out var path, out _))
+                {
+                    archiveEntries.TryAdd(path, archiveEntry);
+                }
+            }
+
+            foreach (var selected in entries)
+            {
+                try
+                {
+                    var selectedPath = selected.ArchiveEntryPath!;
+                    var destination = GetSafeExtractionPath(destinationRoot, selected.Name);
+
+                    if (selected.IsDirectory)
+                    {
+                        Directory.CreateDirectory(destination);
+                        ExtractDirectory(archiveEntries, selectedPath, destinationRoot, selected.Name);
+                    }
+                    else if (archiveEntries.TryGetValue(selectedPath, out var archiveEntry))
+                    {
+                        ExtractFile(archiveEntry, destination);
+                    }
+                    else
+                    {
+                        errors.Add($"{selected.Name}: entry was not found in the archive.");
+                        continue;
+                    }
+
+                    extractedPaths.Add(destination);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
+                {
+                    errors.Add($"{selected.Name}: {ex.Message}");
+                    Log.Warning(ex, "Failed to extract {EntryPath} from ZIP archive {ArchivePath}",
+                        selected.ArchiveEntryPath, archivePath);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
+        {
+            Log.Warning(ex, "Failed to extract entries from ZIP archive {ArchivePath}", archivePath);
+            errors.Add(ex.Message);
+        }
+
+        return new ZipExtractionResult(extractedPaths, errors);
+    }
+
+    public ZipMutationResult DeleteEntries(IReadOnlyList<FileSystemEntry> entries)
+    {
+        if (!TryGetArchiveSelection(entries, out var archivePath, out var selectedPaths, out var error))
+        {
+            return new ZipMutationResult(0, [error]);
+        }
+
+        return RewriteArchive(
+            archivePath,
+            (path, _) => selectedPaths.Any(selected =>
+                string.Equals(path, selected, StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith($"{selected}/", StringComparison.OrdinalIgnoreCase))
+                    ? null
+                    : path,
+            null,
+            entries.Count);
+    }
+
+    public ZipMutationResult RenameEntry(FileSystemEntry entry, string newName)
+    {
+        if (!entry.IsArchiveEntry)
+        {
+            return new ZipMutationResult(0, ["The selected item is not inside a ZIP archive."]);
+        }
+
+        var oldPath = entry.ArchiveEntryPath!;
+        var parent = GetArchiveParent(oldPath);
+        var newPath = parent.Length == 0 ? newName : $"{parent}/{newName}";
+
+        return RewriteArchive(
+            entry.FullPath,
+            (path, _) =>
+            {
+                if (string.Equals(path, oldPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return newPath;
+                }
+
+                var prefix = $"{oldPath}/";
+                return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                    ? $"{newPath}/{path[prefix.Length..]}"
+                    : path;
+            },
+            null,
+            1);
+    }
+
+    public ZipMutationResult CreateEntry(
+        string archivePath,
+        string archiveDirectory,
+        string name,
+        bool isDirectory)
+    {
+        var entryPath = CombineArchivePath(archiveDirectory, name);
+        return RewriteArchive(
+            archivePath,
+            static (path, _) => path,
+            output => output.CreateEntry(
+                isDirectory ? EnsureDirectoryEntryName(entryPath) : entryPath,
+                CompressionLevel.Optimal),
+            1);
+    }
+
+    public ZipMutationResult AddEntries(
+        string archivePath,
+        string archiveDirectory,
+        IReadOnlyList<string> sourcePaths,
+        ZipConflictResolution conflictResolution)
+    {
+        var errors = new List<string>();
+        var listing = LoadDirectory(archivePath, archiveDirectory);
+        if (listing.Error is not null)
+        {
+            return new ZipMutationResult(0, [listing.Error]);
+        }
+
+        var existingNames = listing.Entries
+            .Select(entry => entry.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var assignedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var replacePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var additions = new List<FileSystemEntry>();
+
+        foreach (var sourcePath in sourcePaths)
+        {
+            try
+            {
+                var trimmedPath = sourcePath.TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+                var sourceName = Path.GetFileName(trimmedPath);
+                if (sourceName.Length == 0)
+                {
+                    errors.Add($"{sourcePath}: source name is empty.");
+                    continue;
+                }
+
+                var isDirectory = Directory.Exists(sourcePath);
+                if (!isDirectory && !File.Exists(sourcePath))
+                {
+                    errors.Add($"{sourcePath}: source no longer exists.");
+                    continue;
+                }
+
+                var targetName = sourceName;
+                if (assignedNames.Contains(targetName))
+                {
+                    targetName = GetUniqueArchiveEntryName(existingNames, targetName, isDirectory);
+                }
+                else if (existingNames.Contains(targetName))
+                {
+                    if (conflictResolution == ZipConflictResolution.Duplicate)
+                    {
+                        targetName = GetUniqueArchiveEntryName(existingNames, targetName, isDirectory);
+                    }
+                    else
+                    {
+                        replacePaths.Add(CombineArchivePath(archiveDirectory, targetName));
+                    }
+                }
+
+                existingNames.Add(targetName);
+                assignedNames.Add(targetName);
+
+                additions.Add(new FileSystemEntry(
+                    CombineArchivePath(archiveDirectory, targetName),
+                    sourcePath,
+                    isDirectory,
+                    isDirectory ? 0 : new FileInfo(sourcePath).Length,
+                    isDirectory
+                        ? Directory.GetLastWriteTime(sourcePath)
+                        : File.GetLastWriteTime(sourcePath),
+                    isDirectory ? FileAttributes.Directory : FileAttributes.Normal));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                errors.Add($"{sourcePath}: {ex.Message}");
+                Log.Warning(ex, "Failed to inspect paste source {SourcePath}", sourcePath);
+            }
+        }
+
+        if (additions.Count == 0)
+        {
+            return new ZipMutationResult(0, errors);
+        }
+
+        var collectionErrors = new List<string>();
+        var sources = CollectSources(additions, collectionErrors);
+        if (collectionErrors.Count > 0)
+        {
+            return new ZipMutationResult(0, [.. errors, .. collectionErrors]);
+        }
+
+        var result = RewriteArchive(
+            archivePath,
+            (path, _) => replacePaths.Any(replace =>
+                string.Equals(path, replace, StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith($"{replace}/", StringComparison.OrdinalIgnoreCase))
+                    ? null
+                    : path,
+            output =>
+            {
+                foreach (var source in sources)
+                {
+                    if (source.IsDirectory)
+                    {
+                        output.CreateEntry(EnsureDirectoryEntryName(source.EntryName));
+                    }
+                    else
+                    {
+                        AddFile(output, source.FullPath, source.EntryName);
+                    }
+                }
+            },
+            additions.Count);
+
+        return new ZipMutationResult(result.ItemsChanged, [.. errors, .. result.Errors]);
+    }
+
     public ZipArchiveResult Create(
         IReadOnlyList<FileSystemEntry> entries,
         string destinationDirectory,
@@ -204,6 +516,339 @@ internal sealed class ZipArchiveService
         }
     }
 
+    private CachedArchiveIndex GetOrBuildIndex(FileInfo file)
+    {
+        lock (_indexLock)
+        {
+            if (_indexCache.TryGetValue(file.FullName, out var cached)
+                && cached.Length == file.Length
+                && cached.LastWriteTimeUtc == file.LastWriteTimeUtc)
+            {
+                return cached;
+            }
+        }
+
+        var built = BuildIndex(file);
+        lock (_indexLock)
+        {
+            _indexCache[file.FullName] = built;
+        }
+
+        return built;
+    }
+
+    private static CachedArchiveIndex BuildIndex(FileInfo file)
+    {
+        var nodes = new Dictionary<string, IndexedArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+        var skipped = 0;
+
+        using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+
+        foreach (var entry in archive.Entries)
+        {
+            if (!TryNormalizeArchivePath(entry.FullName, out var path, out var isDirectory))
+            {
+                skipped++;
+                continue;
+            }
+
+            var segments = path.Split('/');
+            for (var i = 1; i < segments.Length; i++)
+            {
+                var directoryPath = string.Join('/', segments, 0, i);
+                nodes.TryAdd(directoryPath, new IndexedArchiveEntry(
+                    directoryPath, true, 0, default));
+            }
+
+            var indexed = new IndexedArchiveEntry(
+                path,
+                isDirectory,
+                isDirectory ? 0 : entry.Length,
+                entry.LastWriteTime.LocalDateTime);
+
+            if (!nodes.TryAdd(path, indexed) && !isDirectory)
+            {
+                nodes[path] = indexed;
+            }
+        }
+
+        var children = new Dictionary<string, List<IndexedArchiveEntry>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [string.Empty] = [],
+        };
+
+        foreach (var node in nodes.Values)
+        {
+            var parent = GetArchiveParent(node.Path);
+            if (!children.TryGetValue(parent, out var list))
+            {
+                list = [];
+                children[parent] = list;
+            }
+
+            list.Add(node);
+            if (node.IsDirectory)
+            {
+                children.TryAdd(node.Path, []);
+            }
+        }
+
+        if (skipped > 0)
+        {
+            Log.Warning("Skipped {Count} unsafe or invalid entries while indexing ZIP archive {ArchivePath}",
+                skipped, file.FullName);
+        }
+
+        return new CachedArchiveIndex(file.Length, file.LastWriteTimeUtc, children);
+    }
+
+    private static bool TryNormalizeArchivePath(string rawPath, out string path, out bool isDirectory)
+    {
+        path = string.Empty;
+        isDirectory = false;
+
+        if (string.IsNullOrEmpty(rawPath) || rawPath[0] is '/' or '\\')
+        {
+            return false;
+        }
+
+        isDirectory = rawPath[^1] is '/' or '\\';
+        var segments = rawPath
+            .Replace('\\', '/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        if (segments.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var segment in segments)
+        {
+            if (segment is "." or ".." || segment.IndexOf('\0') >= 0)
+            {
+                return false;
+            }
+        }
+
+        path = string.Join('/', segments);
+        return true;
+    }
+
+    private static string GetArchiveParent(string path)
+    {
+        var separator = path.LastIndexOf('/');
+        return separator < 0 ? string.Empty : path[..separator];
+    }
+
+    private ZipMutationResult RewriteArchive(
+        string archivePath,
+        Func<string, bool, string?> mapEntry,
+        Action<ZipArchive>? appendEntries,
+        int itemsChanged)
+    {
+        var tempPath = $"{archivePath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            using (var inputStream = new FileStream(
+                       archivePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var input = new ZipArchive(inputStream, ZipArchiveMode.Read))
+            using (var outputStream = new FileStream(
+                       tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var output = new ZipArchive(outputStream, ZipArchiveMode.Create))
+            {
+                foreach (var inputEntry in input.Entries)
+                {
+                    var isDirectory = inputEntry.FullName.EndsWith('/')
+                                      || inputEntry.FullName.EndsWith('\\');
+                    var normalized = TryNormalizeArchivePath(
+                        inputEntry.FullName, out var safePath, out _)
+                            ? safePath
+                            : inputEntry.FullName;
+                    var mappedPath = mapEntry(normalized, isDirectory);
+                    if (mappedPath is null)
+                    {
+                        continue;
+                    }
+
+                    var outputName = isDirectory
+                        ? EnsureDirectoryEntryName(mappedPath)
+                        : mappedPath;
+                    var outputEntry = output.CreateEntry(outputName, CompressionLevel.Optimal);
+                    TrySetEntryTimestamp(outputEntry, inputEntry.LastWriteTime);
+
+                    if (!isDirectory)
+                    {
+                        using var source = inputEntry.Open();
+                        using var destination = outputEntry.Open();
+                        source.CopyTo(destination);
+                    }
+                }
+
+                appendEntries?.Invoke(output);
+            }
+
+            File.Move(tempPath, archivePath, overwrite: true);
+            Invalidate(archivePath);
+            return new ZipMutationResult(itemsChanged, []);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
+        {
+            Log.Warning(ex, "Failed to rewrite ZIP archive {ArchivePath}", archivePath);
+            TryDeleteIncompleteArchive(tempPath);
+            return new ZipMutationResult(0, [ex.Message]);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Unexpected failure rewriting ZIP archive {ArchivePath}", archivePath);
+            TryDeleteIncompleteArchive(tempPath);
+            return new ZipMutationResult(0, [ex.Message]);
+        }
+    }
+
+    private static bool TryGetArchiveSelection(
+        IReadOnlyList<FileSystemEntry> entries,
+        out string archivePath,
+        out string[] selectedPaths,
+        out string error)
+    {
+        archivePath = entries.Count > 0 ? entries[0].FullPath : string.Empty;
+        var selectedArchivePath = archivePath;
+        if (entries.Count == 0
+            || entries.Any(entry => !entry.IsArchiveEntry
+                                    || !string.Equals(entry.FullPath, selectedArchivePath, StringComparison.OrdinalIgnoreCase)))
+        {
+            selectedPaths = [];
+            error = "The selection must contain entries from one ZIP archive.";
+            return false;
+        }
+
+        selectedPaths = entries.Select(entry => entry.ArchiveEntryPath!).ToArray();
+        error = string.Empty;
+        return true;
+    }
+
+    private static string CombineArchivePath(string directory, string name) =>
+        directory.Length == 0 ? name : $"{directory.TrimEnd('/')}/{name}";
+
+    private static string GetUniqueArchiveEntryName(
+        ISet<string> existingNames,
+        string originalName,
+        bool isDirectory)
+    {
+        var extension = isDirectory ? string.Empty : Path.GetExtension(originalName);
+        var baseName = isDirectory ? originalName : Path.GetFileNameWithoutExtension(originalName);
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = $"{baseName} ({suffix}){extension}";
+            if (!existingNames.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    private static void TrySetEntryTimestamp(ZipArchiveEntry entry, DateTimeOffset timestamp)
+    {
+        try
+        {
+            entry.LastWriteTime = timestamp;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // ZIP timestamps cannot represent dates outside 1980-2107; keep the default.
+        }
+    }
+
+    private static void ExtractDirectory(
+        IReadOnlyDictionary<string, ZipArchiveEntry> archiveEntries,
+        string selectedPath,
+        string destinationRoot,
+        string selectedName)
+    {
+        var prefix = $"{selectedPath.TrimEnd('/')}/";
+        foreach (var pair in archiveEntries)
+        {
+            if (!pair.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var relativePath = pair.Key[prefix.Length..];
+            var destination = GetSafeExtractionPath(
+                destinationRoot,
+                Path.Combine(selectedName, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+            if (pair.Value.FullName.EndsWith('/') || pair.Value.FullName.EndsWith('\\'))
+            {
+                Directory.CreateDirectory(destination);
+            }
+            else
+            {
+                ExtractFile(pair.Value, destination);
+            }
+        }
+    }
+
+    private static void ExtractFile(ZipArchiveEntry entry, string destination)
+    {
+        var parent = Path.GetDirectoryName(destination);
+        if (parent is not null)
+        {
+            Directory.CreateDirectory(parent);
+        }
+
+        using var source = entry.Open();
+        using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        source.CopyTo(output);
+        File.SetLastWriteTime(destination, entry.LastWriteTime.LocalDateTime);
+    }
+
+    private static string GetSafeExtractionPath(string root, string relativePath)
+    {
+        var fullRoot = Path.GetFullPath(root)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var fullPath = Path.GetFullPath(Path.Combine(fullRoot, relativePath));
+        if (!fullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Unsafe archive path: {relativePath}");
+        }
+
+        return fullPath;
+    }
+
+    private static void CleanupOldExtractions()
+    {
+        try
+        {
+            if (!Directory.Exists(ExtractionRoot))
+            {
+                return;
+            }
+
+            var cutoff = DateTime.UtcNow.AddDays(-7);
+            foreach (var directory in Directory.EnumerateDirectories(ExtractionRoot))
+            {
+                try
+                {
+                    if (Directory.GetLastWriteTimeUtc(directory) < cutoff)
+                    {
+                        Directory.Delete(directory, recursive: true);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Log.Warning(ex, "Failed to clean old ZIP extraction directory {Directory}", directory);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Warning(ex, "Failed to inspect ZIP extraction directory {Directory}", ExtractionRoot);
+        }
+    }
+
     private sealed class ArchiveSources
     {
         private readonly List<ArchiveSource> _items = [];
@@ -223,8 +868,39 @@ internal sealed class ZipArchiveService
     }
 
     private sealed record ArchiveSource(string FullPath, string EntryName, bool IsDirectory);
+
+    private sealed record IndexedArchiveEntry(
+        string Path,
+        bool IsDirectory,
+        long Size,
+        DateTime LastModified)
+    {
+        public string Name
+        {
+            get
+            {
+                var separator = Path.LastIndexOf('/');
+                return separator < 0 ? Path : Path[(separator + 1)..];
+            }
+        }
+    }
+
+    private sealed record CachedArchiveIndex(
+        long Length,
+        DateTime LastWriteTimeUtc,
+        Dictionary<string, List<IndexedArchiveEntry>> Children);
 }
 
 internal sealed record ZipArchiveProgress(int FilesProcessed, int TotalFiles);
 
 internal sealed record ZipArchiveResult(string? ArchivePath, int FilesAdded, IReadOnlyList<string> Errors);
+
+internal sealed record ZipExtractionResult(IReadOnlyList<string> Paths, IReadOnlyList<string> Errors);
+
+internal enum ZipConflictResolution
+{
+    Replace,
+    Duplicate,
+}
+
+internal sealed record ZipMutationResult(int ItemsChanged, IReadOnlyList<string> Errors);

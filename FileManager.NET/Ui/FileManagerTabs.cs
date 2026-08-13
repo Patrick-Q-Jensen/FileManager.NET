@@ -32,6 +32,7 @@ internal sealed class FileManagerTabs : Window
     private readonly IFileLauncher _fileLauncher;
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
+    private readonly ZipArchiveService _zipArchiveService;
     private readonly Tabs _tabs;
 
     // Guards against queuing more than one deferred tab-strip refresh at a time; rapid navigations
@@ -54,6 +55,7 @@ internal sealed class FileManagerTabs : Window
         _fileLauncher = fileLauncher;
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
+        _zipArchiveService = new ZipArchiveService();
 
         // The host window is only a full-screen frame; the Tabs container fills it and each
         // FileManagerWindow added to it becomes a tab. No outer border avoids a redundant frame
@@ -119,21 +121,39 @@ internal sealed class FileManagerTabs : Window
     /// Creates a new <see cref="FileManagerWindow"/> browsing <paramref name="directory"/>,
     /// adds it as a tab, and focuses it.
     /// </summary>
-    private FileManagerWindow? OpenTab(string directory, bool requireReachable = false)
+    private FileManagerWindow? OpenTab(NavigationLocation location, bool requireReachable = false)
     {
-        var controller = new NavigationController(_directoryService, _entryFilter, _fileLauncher, _sortSettingsService);
-        if (requireReachable && !controller.TryEnterDirectory(directory))
+        var controller = new NavigationController(
+            _directoryService,
+            _entryFilter,
+            _fileLauncher,
+            _sortSettingsService,
+            _zipArchiveService);
+        if (requireReachable && !controller.TryEnterLocation(location))
         {
-            Log.Information("Skipping unavailable restored tab for {Directory}", directory);
+            Log.Information("Skipping unavailable restored tab for {Location}", location.DisplayPath);
             return null;
         }
 
         if (!requireReachable)
         {
-            controller.EnterDirectory(directory);
+            if (location.IsArchive)
+            {
+                controller.EnterArchive(location.PhysicalPath, location.ArchiveDirectory!);
+            }
+            else
+            {
+                controller.EnterDirectory(location.PhysicalPath);
+            }
         }
 
-        var pane = new FileManagerWindow(_app, controller, _favoritesService, _sortSettingsService, _fileLauncher);
+        var pane = new FileManagerWindow(
+            _app,
+            controller,
+            _favoritesService,
+            _sortSettingsService,
+            _fileLauncher,
+            _zipArchiveService);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.
@@ -163,9 +183,13 @@ internal sealed class FileManagerTabs : Window
         FileManagerWindow? activePane = null;
         FileManagerWindow? firstPane = null;
 
-        for (int index = 0; index < sessionState.Directories.Count; index++)
+        for (int index = 0; index < sessionState.Locations.Count; index++)
         {
-            var pane = OpenTab(sessionState.Directories[index], requireReachable: true);
+            var savedLocation = sessionState.Locations[index];
+            var location = savedLocation.ArchiveDirectory is null
+                ? NavigationLocation.Directory(savedLocation.PhysicalPath)
+                : NavigationLocation.Archive(savedLocation.PhysicalPath, savedLocation.ArchiveDirectory);
+            var pane = OpenTab(location, requireReachable: true);
             if (pane is null)
             {
                 continue;
@@ -194,14 +218,19 @@ internal sealed class FileManagerTabs : Window
             return;
         }
 
-        OpenTab(startDirectory);
+        OpenTab(NavigationLocation.Directory(startDirectory));
     }
 
     internal SessionState GetSessionState()
     {
         var panes = _tabs.TabCollection.OfType<FileManagerWindow>().ToArray();
         var activeIndex = Array.IndexOf(panes, _tabs.Value);
-        return new SessionState(panes.Select(pane => pane.CurrentDirectory).ToArray(), Math.Max(0, activeIndex));
+        return new SessionState(
+            panes.Select(pane => new SessionLocation(
+                    pane.CurrentLocation.PhysicalPath,
+                    pane.CurrentLocation.ArchiveDirectory))
+                .ToArray(),
+            Math.Max(0, activeIndex));
     }
 
     /// <summary>
@@ -271,10 +300,10 @@ internal sealed class FileManagerTabs : Window
             return;
         }
 
-        var currentDirectory = (_tabs.Value as FileManagerWindow)?.CurrentDirectory
-            ?? Environment.CurrentDirectory;
+        var currentLocation = (_tabs.Value as FileManagerWindow)?.CurrentLocation
+            ?? NavigationLocation.Directory(Environment.CurrentDirectory);
 
-        OpenTab(currentDirectory);
+        OpenTab(currentLocation);
     }
 
     /// <summary>

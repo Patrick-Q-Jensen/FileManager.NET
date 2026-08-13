@@ -49,7 +49,7 @@ internal sealed class FileManagerWindow : Window
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
     private readonly IFileLauncher _fileLauncher;
-    private readonly ZipArchiveService _zipArchiveService = new();
+    private readonly ZipArchiveService _zipArchiveService;
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -64,6 +64,7 @@ internal sealed class FileManagerWindow : Window
 
     // Token for the periodic auto-refresh timeout, used to unregister it on disposal.
     private object? _autoRefreshToken;
+    private bool _archiveRefreshRunning;
 
     /// <summary>
     /// Raised when this tab has navigated to a different directory (and therefore its tab header
@@ -90,13 +91,22 @@ internal sealed class FileManagerWindow : Window
     /// <summary>The directory currently displayed in this tab.</summary>
     internal string CurrentDirectory => _controller.CurrentDirectory;
 
-    public FileManagerWindow(IApplication app, NavigationController controller, IFavoritesService favoritesService, ISortSettingsService sortSettingsService, IFileLauncher fileLauncher)
+    internal NavigationLocation CurrentLocation => _controller.CurrentLocation;
+
+    public FileManagerWindow(
+        IApplication app,
+        NavigationController controller,
+        IFavoritesService favoritesService,
+        ISortSettingsService sortSettingsService,
+        IFileLauncher fileLauncher,
+        ZipArchiveService zipArchiveService)
     {
         _app = app;
         _controller = controller;
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
         _fileLauncher = fileLauncher;
+        _zipArchiveService = zipArchiveService;
 
         _filterLabel = new Label
         {
@@ -148,6 +158,12 @@ internal sealed class FileManagerWindow : Window
     // controller/views directly. Returning true keeps the timer repeating.
     private bool OnAutoRefreshTimer()
     {
+        if (_controller.IsArchive)
+        {
+            BeginArchiveAutoRefresh();
+            return true;
+        }
+
         try
         {
             _controller.RefreshFromDisk();
@@ -164,6 +180,44 @@ internal sealed class FileManagerWindow : Window
         }
 
         return true;
+    }
+
+    private void BeginArchiveAutoRefresh()
+    {
+        if (_archiveRefreshRunning)
+        {
+            return;
+        }
+
+        _archiveRefreshRunning = true;
+        var location = _controller.CurrentLocation;
+        _ = Task.Run(() => _zipArchiveService.LoadDirectory(
+                location.PhysicalPath,
+                location.ArchiveDirectory!))
+            .ContinueWith(task =>
+            {
+                _app.Invoke(() =>
+                {
+                    try
+                    {
+                        if (task.IsFaulted)
+                        {
+                            Log.Error(task.Exception, "Unexpected auto-refresh failure for ZIP archive {ArchivePath}",
+                                location.PhysicalPath);
+                        }
+                        else if (_controller.CurrentLocation == location)
+                        {
+                            // The background load refreshed the index; this second load is a
+                            // cache hit and only compares the resulting entry metadata.
+                            _controller.RefreshFromDisk();
+                        }
+                    }
+                    finally
+                    {
+                        _archiveRefreshRunning = false;
+                    }
+                });
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     protected override void Dispose(bool disposing)
@@ -230,12 +284,12 @@ internal sealed class FileManagerWindow : Window
                 return; // Let the ListView perform native, virtualized navigation.
 
             case KeyCode.Enter:
-                _controller.Activate(_listView.SelectedItem ?? -1);
+                ActivateSelectedEntry();
                 key.Handled = true;
                 return;
 
             case KeyCode.CursorRight:
-                _controller.DrillInto(_listView.SelectedItem ?? -1);
+                DrillIntoSelectedEntry();
                 key.Handled = true;
                 return;
 
@@ -390,7 +444,7 @@ internal sealed class FileManagerWindow : Window
                 return true;
 
             case KeyCode.L when alt:
-                _controller.DrillInto(_listView.SelectedItem ?? -1);
+                DrillIntoSelectedEntry();
                 return true;
 
             case KeyCode.H when alt:
@@ -510,9 +564,9 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        var text = string.Join('\n', entries.Select(e => e.FullPath));
+        var text = string.Join('\n', entries.Select(GetDisplayPath));
         _controller.SetStatus(_app.Clipboard.TrySetClipboardData(text)
-            ? entries.Count == 1 ? $"Copied path: {entries[0].FullPath}" : $"Copied {entries.Count} paths"
+            ? entries.Count == 1 ? $"Copied path: {GetDisplayPath(entries[0])}" : $"Copied {entries.Count} paths"
             : "Clipboard is not available.");
     }
 
@@ -522,6 +576,12 @@ internal sealed class FileManagerWindow : Window
         if (entry is null || entry.Name == "..")
         {
             _controller.SetStatus("Nothing selected to show properties for.");
+            return;
+        }
+
+        if (entry.IsArchiveEntry)
+        {
+            _controller.SetStatus("Windows properties are not available for entries inside an archive.");
             return;
         }
 
@@ -548,10 +608,110 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        _controller.SetStatus(WindowsFileClipboard.TrySetFiles(entries.Select(e => e.FullPath).ToArray())
+        IReadOnlyList<string> paths;
+        if (entries[0].IsArchiveEntry)
+        {
+            var extraction = RunBackgroundOperation(
+                "Copying from ZIP Archive",
+                "Extracting selected items…",
+                () => _zipArchiveService.ExtractEntries(entries),
+                out var failure);
+
+            if (extraction is null)
+            {
+                _controller.SetStatus($"Copy failed: {failure}");
+                return;
+            }
+
+            if (extraction.Paths.Count == 0)
+            {
+                _controller.SetStatus($"Copy failed: {extraction.Errors.FirstOrDefault() ?? "No items were extracted."}");
+                return;
+            }
+
+            paths = extraction.Paths;
+        }
+        else
+        {
+            paths = entries.Select(e => e.FullPath).ToArray();
+        }
+
+        _controller.SetStatus(WindowsFileClipboard.TrySetFiles(paths)
             ? entries.Count == 1 ? $"Copied: {entries[0].Name}" : $"Copied {entries.Count} items"
             : "Clipboard is not available.");
     }
+
+    private void ActivateSelectedEntry()
+    {
+        var index = _listView.SelectedItem ?? -1;
+        var entry = _controller.GetEntry(index);
+        if (TryOpenZipArchive(entry))
+        {
+            return;
+        }
+
+        if (entry is { IsArchiveEntry: true, IsDirectory: false })
+        {
+            var extraction = RunBackgroundOperation(
+                "Opening ZIP Entry",
+                $"Extracting {entry.Name}…",
+                () => _zipArchiveService.ExtractEntries([entry]),
+                out var failure);
+
+            if (extraction is null || extraction.Paths.Count == 0)
+            {
+                _controller.SetStatus($"Open failed: {failure ?? extraction?.Errors.FirstOrDefault() ?? "Entry could not be extracted."}");
+                return;
+            }
+
+            var error = _fileLauncher.Open(extraction.Paths[0]);
+            _controller.SetStatus(error ?? $"Opened: {entry.Name}");
+            return;
+        }
+
+        _controller.Activate(index);
+    }
+
+    private void DrillIntoSelectedEntry()
+    {
+        var index = _listView.SelectedItem ?? -1;
+        var entry = _controller.GetEntry(index);
+        if (!TryOpenZipArchive(entry))
+        {
+            _controller.DrillInto(index);
+        }
+    }
+
+    private bool TryOpenZipArchive(FileSystemEntry? entry)
+    {
+        if (entry is null
+            || entry.IsArchiveEntry
+            || entry.IsDirectory
+            || !string.Equals(Path.GetExtension(entry.Name), ".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var listing = RunBackgroundOperation(
+            "Opening ZIP Archive",
+            $"Indexing {entry.Name}…",
+            () => _zipArchiveService.LoadDirectory(entry.FullPath, string.Empty),
+            out var failure);
+
+        if (listing is null || listing.Error is not null)
+        {
+            _controller.SetStatus($"Open failed: {failure ?? listing?.Error ?? "Archive could not be read."}");
+            return true;
+        }
+
+        _controller.EnterArchive(entry.FullPath);
+        return true;
+    }
+
+    private static string GetDisplayPath(FileSystemEntry entry) =>
+        entry.IsArchiveEntry
+            ? $"{entry.FullPath}::{entry.ArchiveEntryPath}"
+            : entry.FullPath;
 
     // Returns every marked entry (Ctrl+B marking mode), falling back to just the current
     // selection when nothing is marked. The ".." parent-directory row is optionally excluded
@@ -592,6 +752,12 @@ internal sealed class FileManagerWindow : Window
 
     private void CreateZipArchive()
     {
+        if (_controller.IsArchive)
+        {
+            _controller.SetStatus("Creating nested ZIP archives from archive entries is not supported.");
+            return;
+        }
+
         var entries = GetSelectedEntries(excludeParent: true);
         if (entries.Count == 0)
         {
@@ -702,6 +868,12 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        if (_controller.IsArchive)
+        {
+            PasteIntoArchive(sources);
+            return;
+        }
+
         // Collect the top-level names that already exist in the destination directory.
         var conflicts = sources
             .Select(s =>
@@ -776,6 +948,67 @@ internal sealed class FileManagerWindow : Window
                 : $"Paste failed: {firstError}");
     }
 
+    private void PasteIntoArchive(IReadOnlyList<string> sources)
+    {
+        var location = _controller.CurrentLocation;
+        var listing = _zipArchiveService.LoadDirectory(
+            location.PhysicalPath,
+            location.ArchiveDirectory!);
+        if (listing.Error is not null)
+        {
+            _controller.SetStatus($"Paste failed: {listing.Error}");
+            return;
+        }
+
+        var existingNames = listing.Entries
+            .Select(entry => entry.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var conflicts = sources
+            .Select(source => Path.GetFileName(source.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar)))
+            .Where(name => name.Length > 0 && existingNames.Contains(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var choice = ConflictChoice.Replace;
+        if (conflicts.Count > 0)
+        {
+            choice = ShowPasteConflictDialog(conflicts);
+            if (choice == ConflictChoice.None)
+            {
+                _controller.SetStatus("Paste cancelled.");
+                return;
+            }
+        }
+
+        var result = RunBackgroundOperation(
+            "Updating ZIP Archive",
+            "Adding items and rebuilding archive…",
+            () => _zipArchiveService.AddEntries(
+                location.PhysicalPath,
+                location.ArchiveDirectory!,
+                sources,
+                choice == ConflictChoice.Duplicate
+                    ? ZipConflictResolution.Duplicate
+                    : ZipConflictResolution.Replace),
+            out var failure);
+
+        if (result is null || result.ItemsChanged == 0)
+        {
+            _controller.SetStatus($"Paste failed: {failure ?? result?.Errors.FirstOrDefault() ?? "No items were added."}");
+            return;
+        }
+
+        var firstName = Path.GetFileName(sources[0].TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar));
+        _controller.ReloadSelectingEntry(firstName);
+        _controller.SetStatus(result.Errors.Count == 0
+            ? $"Added {result.ItemsChanged} {(result.ItemsChanged == 1 ? "item" : "items")} to archive."
+            : $"Added {result.ItemsChanged} items with {result.Errors.Count} skipped.");
+    }
+
     // Terminal.Gui sets Console.Title to the dialog Title on every Run() call.
     // Wrap all modal dialog runs through here to keep the title static.
     private void RunDialog(Dialog dialog)
@@ -783,6 +1016,63 @@ internal sealed class FileManagerWindow : Window
         var savedTitle = Console.Title;
         _app.Run(dialog);
         Console.Title = savedTitle;
+    }
+
+    private T? RunBackgroundOperation<T>(
+        string title,
+        string message,
+        Func<T> operation,
+        out string? failure)
+        where T : class
+    {
+        T? result = null;
+        string? operationFailure = null;
+
+        var label = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = message,
+        };
+
+        var dialog = new Dialog
+        {
+            Title = title,
+            Width = Dim.Percent(60),
+            Height = 5,
+        };
+        dialog.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode is KeyCode.Esc or KeyCode.Enter)
+            {
+                key.Handled = true;
+            }
+        };
+        dialog.Add(label);
+
+        _ = Task.Run(operation).ContinueWith(task =>
+        {
+            _app.Invoke(() =>
+            {
+                if (task.IsCompletedSuccessfully)
+                {
+                    result = task.Result;
+                }
+                else
+                {
+                    operationFailure = task.Exception?.GetBaseException().Message
+                        ?? "An unexpected error occurred.";
+                    Log.Error(task.Exception, "{Operation} failed unexpectedly", title);
+                }
+
+                _app.RequestStop(dialog);
+            });
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+
+        RunDialog(dialog);
+        failure = operationFailure;
+        return result;
     }
 
     private ConflictChoice ShowPasteConflictDialog(IReadOnlyList<string> conflicts)
@@ -842,6 +1132,12 @@ internal sealed class FileManagerWindow : Window
 
     private void AddCurrentDirectoryToFavorites()
     {
+        if (_controller.IsArchive)
+        {
+            _controller.SetStatus("Archive locations cannot be added to favorites.");
+            return;
+        }
+
         var directory = _controller.CurrentDirectory;
 
         // Fire-and-forget: keep the UI responsive; status is updated when the task completes.
@@ -1193,6 +1489,28 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        if (_controller.IsArchive)
+        {
+            var result = RunBackgroundOperation(
+                "Updating ZIP Archive",
+                "Deleting items and rebuilding archive…",
+                () => _zipArchiveService.DeleteEntries(entries),
+                out var failure);
+
+            if (result is null || result.ItemsChanged == 0)
+            {
+                _controller.SetStatus($"Delete failed: {failure ?? result?.Errors.FirstOrDefault() ?? "No items were deleted."}");
+                return;
+            }
+
+            var location = _controller.CurrentLocation;
+            _controller.EnterArchive(location.PhysicalPath, location.ArchiveDirectory!);
+            _controller.SetStatus(result.Errors.Count == 0
+                ? result.ItemsChanged == 1 ? $"Deleted: {entries[0].Name}" : $"Deleted {result.ItemsChanged} items"
+                : $"Deleted {result.ItemsChanged} items with {result.Errors.Count} errors.");
+            return;
+        }
+
         var deleted = 0;
         string? firstFailure = null;
         var failed = 0;
@@ -1339,6 +1657,49 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        if (entry.IsArchiveEntry)
+        {
+            if (!TryValidateWindowsFolderName(newName, out var validationError))
+            {
+                _controller.SetStatus($"Rename cancelled: {validationError}");
+                return;
+            }
+
+            var location = _controller.CurrentLocation;
+            var listing = _zipArchiveService.LoadDirectory(
+                location.PhysicalPath,
+                location.ArchiveDirectory!);
+            if (listing.Error is not null)
+            {
+                _controller.SetStatus($"Rename failed: {listing.Error}");
+                return;
+            }
+
+            if (listing.Entries.Any(existing =>
+                    !string.Equals(existing.Identity, entry.Identity, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(existing.Name, newName, StringComparison.OrdinalIgnoreCase)))
+            {
+                _controller.SetStatus($"Rename cancelled: '{newName}' already exists.");
+                return;
+            }
+
+            var result = RunBackgroundOperation(
+                "Updating ZIP Archive",
+                "Renaming item and rebuilding archive…",
+                () => _zipArchiveService.RenameEntry(entry, newName),
+                out var failure);
+
+            if (result is null || result.ItemsChanged == 0)
+            {
+                _controller.SetStatus($"Rename failed: {failure ?? result?.Errors.FirstOrDefault() ?? "Archive was not changed."}");
+                return;
+            }
+
+            _controller.ReloadSelectingEntry(newName);
+            _controller.SetStatus($"Renamed: {entry.Name} → {newName}");
+            return;
+        }
+
         var newFullPath = Path.Combine(_controller.CurrentDirectory, newName);
 
         try
@@ -1408,6 +1769,52 @@ internal sealed class FileManagerWindow : Window
         if (name.Length == 0)
         {
             _controller.SetStatus("Create cancelled: name cannot be empty.");
+            return;
+        }
+
+        if (_controller.IsArchive)
+        {
+            if (!TryValidateWindowsFolderName(name, out var archiveValidationError))
+            {
+                _controller.SetStatus($"Create cancelled: {archiveValidationError}");
+                return;
+            }
+
+            var location = _controller.CurrentLocation;
+            var listing = _zipArchiveService.LoadDirectory(
+                location.PhysicalPath,
+                location.ArchiveDirectory!);
+            if (listing.Error is not null)
+            {
+                _controller.SetStatus($"Create failed: {listing.Error}");
+                return;
+            }
+
+            if (listing.Entries.Any(existing =>
+                    string.Equals(existing.Name, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                _controller.SetStatus($"Create cancelled: '{name}' already exists.");
+                return;
+            }
+
+            var result = RunBackgroundOperation(
+                "Updating ZIP Archive",
+                "Creating item and rebuilding archive…",
+                () => _zipArchiveService.CreateEntry(
+                    location.PhysicalPath,
+                    location.ArchiveDirectory!,
+                    name,
+                    createDirectory),
+                out var failure);
+
+            if (result is null || result.ItemsChanged == 0)
+            {
+                _controller.SetStatus($"Create failed: {failure ?? result?.Errors.FirstOrDefault() ?? "Archive was not changed."}");
+                return;
+            }
+
+            _controller.ReloadSelectingEntry(name);
+            _controller.SetStatus($"Created {(createDirectory ? "folder" : "file")}: {name}");
             return;
         }
 
@@ -1497,6 +1904,12 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        if (entry.IsArchiveEntry)
+        {
+            _controller.SetStatus("Execute with arguments is not available for archive entries.");
+            return;
+        }
+
         string? args = null;
 
         var textField = new TextField
@@ -1538,6 +1951,12 @@ internal sealed class FileManagerWindow : Window
 
     private void ShowRunCommandDialog()
     {
+        if (_controller.IsArchive)
+        {
+            _controller.SetStatus("Commands cannot run with an archive directory as their working directory.");
+            return;
+        }
+
         string? command = null;
 
         var textField = new TextField
@@ -1667,9 +2086,9 @@ internal sealed class FileManagerWindow : Window
             "  \u2191 / \u2193           Move selection up / down",
             "  PgUp / PgDn     Page up / page down",
             "  Home / End      Jump to first / last",
-            "  \u2192               Drill into directory",
+            "  \u2192               Drill into directory or ZIP archive",
             "  \u2190               Go to parent directory",
-            "  Enter           Open file or directory",
+            "  Enter           Open file, directory, or ZIP archive",
             "  Del             Delete selected / marked items",
             "  Backspace       Edit the active filter",
             "  Esc             Clear filter  /  quit",
@@ -1745,7 +2164,7 @@ internal sealed class FileManagerWindow : Window
                 && _renderedEntries is { } renderedEntries
                 && selectedItem >= 0
                 && selectedItem < renderedEntries.Count
-                    ? renderedEntries[selectedItem].FullPath
+                    ? renderedEntries[selectedItem].Identity
                     : null;
 
             var nameColumnWidth = EntryRowFormatter.ComputeNameColumnWidth(entries);
@@ -1767,7 +2186,7 @@ internal sealed class FileManagerWindow : Window
                 for (int i = 0; i < entries.Count; i++)
                 {
                     if ((restore is not null && string.Equals(entries[i].Name, restore, StringComparison.OrdinalIgnoreCase))
-                        || (restore is null && string.Equals(entries[i].FullPath, selectedPath, StringComparison.OrdinalIgnoreCase)))
+                        || (restore is null && string.Equals(entries[i].Identity, selectedPath, StringComparison.OrdinalIgnoreCase)))
                     {
                         selectedIndex = i;
                         break;
@@ -1784,7 +2203,7 @@ internal sealed class FileManagerWindow : Window
             _renderedEntries = entries;
         }
 
-        Title = FormatTitle(_controller.CurrentDirectory, TabTitleWidth);
+        Title = FormatTitle(_controller.DisplayPath, TabTitleWidth);
         _filterLabel.Text = _controller.Query.Length > 0
             ? $" /{_controller.Query}"
             : " / ";
@@ -1799,14 +2218,13 @@ internal sealed class FileManagerWindow : Window
         // the OTHER tabs (their cached header widths) to avoid overlapping headers, so it is the
         // host's responsibility. Notify it only on an actual directory change; filter/status-only
         // refreshes are skipped.
-        if (!string.Equals(_renderedDirectory, _controller.CurrentDirectory, StringComparison.Ordinal))
+        if (!string.Equals(_renderedDirectory, _controller.DisplayPath, StringComparison.Ordinal))
         {
-            _renderedDirectory = _controller.CurrentDirectory;
+            _renderedDirectory = _controller.DisplayPath;
             DirectoryChanged?.Invoke();
         }
     }
 
-    /// <summary>
     /// <summary>
     /// Reapplies <see cref="FormatTitle"/> using the current <see cref="TabTitleWidth"/> without
     /// triggering a full data refresh. Called by the host after updating <see cref="TabTitleWidth"/>
@@ -1814,7 +2232,7 @@ internal sealed class FileManagerWindow : Window
     /// </summary>
     internal void RefreshTitle()
     {
-        Title = FormatTitle(_controller.CurrentDirectory, TabTitleWidth);
+        Title = FormatTitle(_controller.DisplayPath, TabTitleWidth);
     }
 
     /// Builds the window/console title so the most relevant part of the path stays visible when

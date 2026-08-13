@@ -18,8 +18,8 @@ internal sealed class NavigationController
     private readonly IEntryFilter _filter;
     private readonly IFileLauncher _launcher;
     private readonly ISortSettingsService _sortSettings;
+    private readonly ZipArchiveService _zipArchiveService;
     private readonly NavigationState _state = new();
-    private readonly Stack<string> _breadcrumb = new();
 
     // Null means "follow the global default"; set by SetLocalSortMode (Ctrl+O) to override it
     // for just this pane.
@@ -29,12 +29,14 @@ internal sealed class NavigationController
         IDirectoryService directoryService,
         IEntryFilter filter,
         IFileLauncher launcher,
-        ISortSettingsService sortSettings)
+        ISortSettingsService sortSettings,
+        ZipArchiveService zipArchiveService)
     {
         _directoryService = directoryService;
         _filter = filter;
         _launcher = launcher;
         _sortSettings = sortSettings;
+        _zipArchiveService = zipArchiveService;
 
         // Only re-sort/refresh when this pane is actually following the global default;
         // panes with a local override are unaffected by other panes changing it.
@@ -62,7 +64,13 @@ internal sealed class NavigationController
     /// <summary>Raised after any change to the navigation state.</summary>
     public event Action? Changed;
 
-    public string CurrentDirectory => _state.CurrentDirectory;
+    public NavigationLocation CurrentLocation => _state.Location;
+
+    public string CurrentDirectory => _state.Location.ContainingDirectory;
+
+    public string DisplayPath => _state.Location.DisplayPath;
+
+    public bool IsArchive => _state.Location.IsArchive;
 
     public string Query => _state.Query;
 
@@ -89,7 +97,13 @@ internal sealed class NavigationController
     public void EnterDirectory(string path)
     {
         RestoredSelection = null;
-        LoadDirectory(path);
+        LoadLocation(NavigationLocation.Directory(path));
+    }
+
+    public void EnterArchive(string archivePath, string archiveDirectory = "")
+    {
+        RestoredSelection = null;
+        LoadLocation(NavigationLocation.Archive(archivePath, archiveDirectory));
     }
 
     /// <summary>
@@ -97,22 +111,25 @@ internal sealed class NavigationController
     /// Used to restore a prior session without opening tabs for disconnected or inaccessible paths.
     /// </summary>
     public bool TryEnterDirectory(string path)
+        => TryEnterLocation(NavigationLocation.Directory(path));
+
+    public bool TryEnterLocation(NavigationLocation location)
     {
         try
         {
-            var listing = _directoryService.Load(path);
+            var listing = LoadListing(location);
             if (listing.Error is not null)
             {
                 return false;
             }
 
             RestoredSelection = null;
-            ApplyListing(path, listing);
+            ApplyListing(location, listing);
             return true;
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "Failed to restore directory {Path}", path);
+            Log.Warning(ex, "Failed to restore location {Path}", location.DisplayPath);
             return false;
         }
     }
@@ -125,24 +142,29 @@ internal sealed class NavigationController
     public void ReloadSelectingEntry(string entryName)
     {
         RestoredSelection = entryName;
-        LoadDirectory(_state.CurrentDirectory);
+        LoadLocation(_state.Location);
     }
 
-    private void LoadDirectory(string path)
+    private void LoadLocation(NavigationLocation location)
     {
         var stopwatch = Stopwatch.StartNew();
-        var listing = _directoryService.Load(path);
+        var listing = LoadListing(location);
         stopwatch.Stop();
         Log.Debug(
-            "LoadDirectory {Path} took {ElapsedMs}ms ({EntryCount} entries)",
-            path, stopwatch.ElapsedMilliseconds, listing.Entries.Count);
+            "LoadLocation {Path} took {ElapsedMs}ms ({EntryCount} entries)",
+            location.DisplayPath, stopwatch.ElapsedMilliseconds, listing.Entries.Count);
 
-        ApplyListing(path, listing);
+        ApplyListing(location, listing);
     }
 
-    private void ApplyListing(string path, DirectoryListing listing)
+    private DirectoryListing LoadListing(NavigationLocation location) =>
+        location.IsArchive
+            ? _zipArchiveService.LoadDirectory(location.PhysicalPath, location.ArchiveDirectory!)
+            : _directoryService.Load(location.PhysicalPath);
+
+    private void ApplyListing(NavigationLocation location, DirectoryListing listing)
     {
-        _state.CurrentDirectory = path;
+        _state.Location = location;
         _state.AllEntries = listing.Entries.ToList();
         _state.Query = string.Empty;
         _state.StatusMessage = listing.Error;
@@ -153,13 +175,32 @@ internal sealed class NavigationController
     /// <summary>Navigates to the parent directory, if any.</summary>
     public void GoToParent()
     {
-        var parent = Directory.GetParent(_state.CurrentDirectory);
+        if (_state.Location.IsArchive)
+        {
+            var archiveDirectory = _state.Location.ArchiveDirectory!;
+            if (archiveDirectory.Length == 0)
+            {
+                RestoredSelection = Path.GetFileName(_state.Location.PhysicalPath);
+                LoadLocation(NavigationLocation.Directory(_state.Location.ContainingDirectory));
+                return;
+            }
+
+            var separator = archiveDirectory.LastIndexOf('/');
+            RestoredSelection = separator < 0
+                ? archiveDirectory
+                : archiveDirectory[(separator + 1)..];
+            var parentDirectory = separator < 0 ? string.Empty : archiveDirectory[..separator];
+            LoadLocation(NavigationLocation.Archive(_state.Location.PhysicalPath, parentDirectory));
+            return;
+        }
+
+        var parent = Directory.GetParent(_state.Location.PhysicalPath);
         if (parent is not null)
         {
             // Remember the current directory name so the view can re-select it after moving up.
-            RestoredSelection = Path.GetFileName(_state.CurrentDirectory.TrimEnd(
+            RestoredSelection = Path.GetFileName(_state.Location.PhysicalPath.TrimEnd(
                 Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            LoadDirectory(parent.FullName);
+            LoadLocation(NavigationLocation.Directory(parent.FullName));
         }
     }
 
@@ -210,12 +251,12 @@ internal sealed class NavigationController
         }
 
         var entry = _state.FilteredEntries[index];
-        if (entry.IsDirectory)
+        if (TryEnterEntry(entry))
         {
-            RestoredSelection = null;
-            EnterDirectory(entry.FullPath);
+            return;
         }
-        else
+
+        if (!entry.IsArchiveEntry)
         {
             _state.StatusMessage = _launcher.Open(entry.FullPath);
             Changed?.Invoke();
@@ -229,11 +270,38 @@ internal sealed class NavigationController
     public void DrillInto(int index)
     {
         var entry = GetEntry(index);
-        if (entry is { IsDirectory: true })
+        if (entry is not null)
         {
-            RestoredSelection = null;
-            EnterDirectory(entry.FullPath);
+            TryEnterEntry(entry);
         }
+    }
+
+    private bool TryEnterEntry(FileSystemEntry entry)
+    {
+        if (entry.IsArchiveEntry)
+        {
+            if (!entry.IsDirectory)
+            {
+                return false;
+            }
+
+            EnterArchive(entry.FullPath, entry.ArchiveEntryPath!);
+            return true;
+        }
+
+        if (entry.IsDirectory)
+        {
+            EnterDirectory(entry.FullPath);
+            return true;
+        }
+
+        if (string.Equals(Path.GetExtension(entry.Name), ".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            EnterArchive(entry.FullPath);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -244,7 +312,7 @@ internal sealed class NavigationController
     /// </summary>
     public void RefreshFromDisk()
     {
-        var listing = _directoryService.Load(_state.CurrentDirectory);
+        var listing = LoadListing(_state.Location);
         if (listing.Error is not null || EntriesEqual(_state.AllEntries, listing.Entries))
         {
             return;

@@ -10,8 +10,15 @@ internal sealed record FileSystemEntry(
     bool IsDirectory,
     long Size,
     DateTime LastModified,
-    FileAttributes Attributes)
+    FileAttributes Attributes,
+    string? ArchiveEntryPath = null)
 {
+    public bool IsArchiveEntry => ArchiveEntryPath is not null;
+
+    public string Identity => IsArchiveEntry
+        ? $"{FullPath}::{ArchiveEntryPath}"
+        : FullPath;
+
     /// <summary>
     /// Creates the synthetic ".." entry used to navigate up to <paramref name="parentFullPath"/>.
     /// </summary>
