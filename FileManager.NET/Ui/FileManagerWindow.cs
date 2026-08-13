@@ -515,6 +515,11 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        StartFlattenOperation();
+    }
+
+    private void StartFlattenOperation()
+    {
         if (!_controller.BeginFlatten())
         {
             return;
@@ -528,6 +533,27 @@ internal sealed class FileManagerWindow : Window
         var rootPath = _controller.CurrentDirectory;
 
         _ = Task.Run(() => RunFlattenWorker(operation, rootPath));
+    }
+
+    private void RefreshAfterMutation(Action updateFlattenedView, Action updateDirectoryView)
+    {
+        if (!_controller.IsFlattened)
+        {
+            updateDirectoryView();
+            return;
+        }
+
+        var enumerationWasRunning = _controller.IsFlattening;
+        StopFlattenOperation();
+
+        if (enumerationWasRunning)
+        {
+            StartFlattenOperation();
+        }
+        else
+        {
+            updateFlattenedView();
+        }
     }
 
     private void RunFlattenWorker(FlattenOperation operation, string rootPath)
@@ -790,6 +816,11 @@ internal sealed class FileManagerWindow : Window
     private void CopySelectedItemToClipboard()
     {
         var entries = GetSelectedEntries(excludeParent: true);
+        if (_controller.IsFlattened)
+        {
+            entries = CollapseNestedSelections(entries);
+        }
+
         if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to copy.");
@@ -947,6 +978,11 @@ internal sealed class FileManagerWindow : Window
         }
 
         var entries = GetSelectedEntries(excludeParent: true);
+        if (_controller.IsFlattened)
+        {
+            entries = CollapseNestedSelections(entries);
+        }
+
         if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to archive.");
@@ -1043,14 +1079,10 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        try
-        {
-            _controller.RefreshFromDisk();
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Created ZIP archive but failed to refresh {Directory}", destinationDirectory);
-        }
+        var archiveEntry = CreateEntryFromDisk(result.ArchivePath, isDirectory: false);
+        RefreshAfterMutation(
+            () => _controller.AddFlattenedEntry(archiveEntry),
+            _controller.RefreshFromDisk);
 
         _controller.SetStatus(result.Errors.Count == 0
             ? $"Created: {Path.GetFileName(result.ArchivePath)} ({result.FilesAdded} files)"
@@ -1203,7 +1235,12 @@ internal sealed class FileManagerWindow : Window
             }
         }
 
-        _controller.EnterDirectory(_controller.CurrentDirectory);
+        if (ok > 0)
+        {
+            RefreshAfterMutation(
+                updateFlattenedView: StartFlattenOperation,
+                updateDirectoryView: () => _controller.EnterDirectory(_controller.CurrentDirectory));
+        }
 
         int total = sources.Count;
         _controller.SetStatus(firstError is null
@@ -1708,6 +1745,11 @@ internal sealed class FileManagerWindow : Window
     private void ShowDeleteConfirmDialog()
     {
         var entries = GetSelectedEntries(excludeParent: true);
+        if (_controller.IsFlattened)
+        {
+            entries = CollapseNestedSelections(entries);
+        }
+
         if (entries.Count == 0)
         {
             _controller.SetStatus("Nothing selected to delete.");
@@ -1777,6 +1819,7 @@ internal sealed class FileManagerWindow : Window
         }
 
         var deleted = 0;
+        var deletedEntries = new List<FileSystemEntry>(entries.Count);
         string? firstFailure = null;
         var failed = 0;
 
@@ -1803,6 +1846,7 @@ internal sealed class FileManagerWindow : Window
                 }
 
                 deleted++;
+                deletedEntries.Add(entry);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -1818,14 +1862,16 @@ internal sealed class FileManagerWindow : Window
             }
         }
 
+        if (deleted > 0)
+        {
+            RefreshAfterMutation(
+                () => _controller.RemoveFlattenedEntries(deletedEntries),
+                () => _controller.EnterDirectory(_controller.CurrentDirectory));
+        }
+
         _controller.SetStatus(failed == 0
             ? deleted == 1 ? $"Deleted: {entries[0].Name}" : $"Deleted {deleted} items"
             : $"Deleted {deleted}, skipped {failed} — {firstFailure}");
-
-        if (deleted > 0)
-        {
-            _controller.EnterDirectory(_controller.CurrentDirectory);
-        }
     }
 
     // Cheap pre-check so obvious blockers are reported without attempting a partial delete.
@@ -1965,7 +2011,14 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        var newFullPath = Path.Combine(_controller.CurrentDirectory, newName);
+        var containingDirectory = Path.GetDirectoryName(entry.FullPath);
+        if (containingDirectory is null)
+        {
+            _controller.SetStatus($"Rename failed: could not determine the parent of {entry.FullPath}");
+            return;
+        }
+
+        var newFullPath = Path.Combine(containingDirectory, newName);
 
         try
         {
@@ -1978,7 +2031,9 @@ internal sealed class FileManagerWindow : Window
                 File.Move(entry.FullPath, newFullPath);
             }
 
-            _controller.ReloadSelectingEntry(newName);
+            RefreshAfterMutation(
+                () => _controller.RenameFlattenedEntry(entry, newFullPath),
+                () => _controller.ReloadSelectingEntry(newName));
             _controller.SetStatus($"Renamed: {entry.Name} \u2192 {newName}");
         }
         catch (Exception ex)
@@ -2111,7 +2166,10 @@ internal sealed class FileManagerWindow : Window
                 }
             }
 
-            _controller.ReloadSelectingEntry(name);
+            var createdEntry = CreateEntryFromDisk(fullPath, createDirectory);
+            RefreshAfterMutation(
+                () => _controller.AddFlattenedEntry(createdEntry),
+                () => _controller.ReloadSelectingEntry(name));
             _controller.SetStatus($"Created {(createDirectory ? "folder" : "file")}: {name}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
@@ -2456,7 +2514,9 @@ internal sealed class FileManagerWindow : Window
             {
                 for (int i = 0; i < entries.Count; i++)
                 {
-                    if ((restore is not null && string.Equals(entries[i].Name, restore, StringComparison.OrdinalIgnoreCase))
+                    if ((restore is not null
+                         && (string.Equals(entries[i].Name, restore, StringComparison.OrdinalIgnoreCase)
+                             || string.Equals(entries[i].Identity, restore, StringComparison.OrdinalIgnoreCase)))
                         || (restore is null && string.Equals(entries[i].Identity, selectedPath, StringComparison.OrdinalIgnoreCase)))
                     {
                         selectedIndex = i;
@@ -2583,6 +2643,78 @@ internal sealed class FileManagerWindow : Window
                 return candidate;
         }
     }
+
+    private static IReadOnlyList<FileSystemEntry> CollapseNestedSelections(IReadOnlyList<FileSystemEntry> entries)
+    {
+        if (entries.Count < 2)
+        {
+            return entries;
+        }
+
+        var selectedDirectories = new HashSet<string>(
+            entries.Where(entry => entry.IsDirectory).Select(entry => entry.FullPath),
+            StringComparer.OrdinalIgnoreCase);
+        if (selectedDirectories.Count == 0)
+        {
+            return entries;
+        }
+
+        var collapsed = new List<FileSystemEntry>(entries.Count);
+        foreach (var entry in entries)
+        {
+            var parentPath = Path.GetDirectoryName(entry.FullPath);
+            var nested = false;
+            while (parentPath is not null)
+            {
+                if (selectedDirectories.Contains(parentPath))
+                {
+                    nested = true;
+                    break;
+                }
+
+                parentPath = Path.GetDirectoryName(parentPath);
+            }
+
+            if (!nested)
+            {
+                collapsed.Add(entry);
+            }
+        }
+
+        return collapsed;
+    }
+
+    private static FileSystemEntry CreateEntryFromDisk(string fullPath, bool isDirectory)
+    {
+        try
+        {
+            return new FileSystemEntry(
+                Path.GetFileName(fullPath),
+                fullPath,
+                isDirectory,
+                isDirectory ? 0 : new FileInfo(fullPath).Length,
+                File.GetLastWriteTime(fullPath),
+                File.GetAttributes(fullPath));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Warning(ex, "Created {Path} but failed to read its display metadata", fullPath);
+            return CreateFallbackEntry(fullPath, isDirectory);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Unexpected failure reading display metadata for created entry {Path}", fullPath);
+            return CreateFallbackEntry(fullPath, isDirectory);
+        }
+    }
+
+    private static FileSystemEntry CreateFallbackEntry(string fullPath, bool isDirectory) => new(
+        Path.GetFileName(fullPath),
+        fullPath,
+        isDirectory,
+        0,
+        DateTime.Now,
+        isDirectory ? FileAttributes.Directory : FileAttributes.Normal);
 
     private static void CopyDirectory(string source, string dest)
     {

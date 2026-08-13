@@ -85,8 +85,8 @@ internal sealed class NavigationController
     public IReadOnlyList<FileSystemEntry> FilteredEntries => _state.FilteredEntries;
 
     /// <summary>
-    /// The child directory name to re-select after navigating up, or <c>null</c> when there is
-    /// nothing to restore. Consumed and cleared by the view on each refresh.
+    /// The entry name or identity to re-select after a navigation or flattened-view mutation,
+    /// or <c>null</c> when there is nothing to restore. Consumed by the view on refresh.
     /// </summary>
     public string? RestoredSelection { get; private set; }
 
@@ -396,6 +396,98 @@ internal sealed class NavigationController
         Changed?.Invoke();
     }
 
+    /// <summary>Removes successfully deleted entries and their descendants from a completed flattened view.</summary>
+    public void RemoveFlattenedEntries(IReadOnlyList<FileSystemEntry> removedEntries)
+    {
+        if (!IsFlattened || _flattenEntries is null || removedEntries.Count == 0)
+        {
+            return;
+        }
+
+        IsFlattening = false;
+        var removedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var removedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in removedEntries)
+        {
+            removedPaths.Add(entry.FullPath);
+            if (entry.IsDirectory)
+            {
+                removedDirectories.Add(entry.FullPath);
+            }
+        }
+
+        _flattenEntries.RemoveAll(entry =>
+            removedPaths.Contains(entry.FullPath)
+            || HasAncestor(entry.FullPath, removedDirectories));
+        PublishFlattenMutation();
+    }
+
+    /// <summary>Updates a renamed entry and any flattened descendants without rescanning the tree.</summary>
+    public void RenameFlattenedEntry(FileSystemEntry renamedEntry, string newFullPath)
+    {
+        if (!IsFlattened || _flattenEntries is null)
+        {
+            return;
+        }
+
+        IsFlattening = false;
+        var oldPrefix = renamedEntry.FullPath.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var newPrefix = newFullPath.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+        for (var i = 0; i < _flattenEntries.Count; i++)
+        {
+            var entry = _flattenEntries[i];
+            var isRenamedEntry = string.Equals(
+                entry.FullPath,
+                renamedEntry.FullPath,
+                StringComparison.OrdinalIgnoreCase);
+            string? updatedPath = null;
+
+            if (isRenamedEntry)
+            {
+                updatedPath = newFullPath;
+            }
+            else if (renamedEntry.IsDirectory
+                     && entry.FullPath.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                updatedPath = newPrefix + entry.FullPath[oldPrefix.Length..];
+            }
+
+            if (updatedPath is null)
+            {
+                continue;
+            }
+
+            _flattenEntries[i] = entry with
+            {
+                Name = isRenamedEntry ? Path.GetFileName(newFullPath) : entry.Name,
+                FullPath = updatedPath,
+                RelativeParentPath = GetRelativeParentPath(updatedPath),
+            };
+        }
+
+        RestoredSelection = newFullPath;
+        PublishFlattenMutation();
+    }
+
+    /// <summary>Adds a newly created root entry to a completed flattened view.</summary>
+    public void AddFlattenedEntry(FileSystemEntry entry)
+    {
+        if (!IsFlattened || _flattenEntries is null)
+        {
+            return;
+        }
+
+        IsFlattening = false;
+        _flattenEntries.Add(entry);
+        RestoredSelection = entry.Identity;
+        PublishFlattenMutation();
+    }
+
     /// <summary>Restores the ordinary listing for the current directory.</summary>
     public void ExitFlatten()
     {
@@ -415,6 +507,50 @@ internal sealed class NavigationController
         _state.AllEntries = _flattenEntries;
         _flattenEntriesPublished = true;
         ApplyFilter();
+    }
+
+    private void PublishFlattenMutation()
+    {
+        if (_flattenEntries is null)
+        {
+            return;
+        }
+
+        _state.AllEntries = _flattenEntries;
+        ApplyFilter();
+        Changed?.Invoke();
+    }
+
+    private string? GetRelativeParentPath(string fullPath)
+    {
+        var parentPath = Path.GetDirectoryName(fullPath);
+        if (parentPath is null)
+        {
+            return null;
+        }
+
+        var relativePath = Path.GetRelativePath(CurrentDirectory, parentPath);
+        return relativePath == "."
+            ? null
+            : relativePath
+                .Replace(Path.DirectorySeparatorChar, '/')
+                .Replace(Path.AltDirectorySeparatorChar, '/');
+    }
+
+    private static bool HasAncestor(string path, HashSet<string> candidates)
+    {
+        var parentPath = Path.GetDirectoryName(path);
+        while (parentPath is not null)
+        {
+            if (candidates.Contains(parentPath))
+            {
+                return true;
+            }
+
+            parentPath = Path.GetDirectoryName(parentPath);
+        }
+
+        return false;
     }
 
     private void ResetFlattenState()
