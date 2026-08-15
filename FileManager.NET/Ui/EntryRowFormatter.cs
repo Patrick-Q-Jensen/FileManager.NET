@@ -24,6 +24,8 @@ internal static class EntryRowFormatter
     private const int SizeNumberColumnWidth = 6;
     private const int SizeUnitColumnWidth = 2;
 
+    private const string NameDateGap = "   ";
+
     // Extra spacing between the date and size columns, on top of the normal single-space gap.
     private const int DateSizeGap = 3;
 
@@ -72,7 +74,7 @@ internal static class EntryRowFormatter
         var (sizeNumber, sizeUnit) = entry.IsDirectory ? (string.Empty, string.Empty) : FormatSize(entry.Size);
         var gap = new string(' ', DateSizeGap);
 
-        return $"{FitName(name, nameColumnWidth)} {modified,DateColumnWidth}{gap}{sizeNumber,SizeNumberColumnWidth} {sizeUnit,-SizeUnitColumnWidth}";
+        return $"{FitName(name, nameColumnWidth)}{NameDateGap}{modified,DateColumnWidth}{gap}{sizeNumber,SizeNumberColumnWidth} {sizeUnit,-SizeUnitColumnWidth}";
     }
 
     private static string FitName(string name, int nameColumnWidth) =>
