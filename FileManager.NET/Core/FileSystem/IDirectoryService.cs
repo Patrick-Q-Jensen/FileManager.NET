@@ -9,6 +9,41 @@ internal sealed record DirectoryListing(IReadOnlyList<FileSystemEntry> Entries, 
 /// <summary>The outcome of recursively enumerating a directory tree.</summary>
 internal sealed record DirectoryTreeResult(int EntriesFound, int PathsSkipped);
 
+internal enum PasteConflictResolution
+{
+    None,
+    Replace,
+    Duplicate,
+}
+
+internal enum PasteProgressPhase
+{
+    Preparing,
+    Copying,
+    Rebuilding,
+    Finalizing,
+}
+
+internal sealed record PasteProgress(
+    PasteProgressPhase Phase,
+    string? CurrentPath,
+    int FilesCompleted,
+    int TotalFiles,
+    long BytesCopied,
+    long TotalBytes);
+
+internal sealed record PasteResult(
+    int FilesCopied,
+    int TotalFiles,
+    int DirectoriesCreated,
+    long BytesCopied,
+    long TotalBytes,
+    bool Cancelled,
+    IReadOnlyList<string> Errors)
+{
+    public bool ItemsChanged => FilesCopied > 0 || DirectoriesCreated > 0;
+}
+
 /// <summary>
 /// Loads directory contents for the file manager. Kept behind an interface so it can be
 /// swapped later for asynchronous loading or virtual file systems (archives, remote shares)
@@ -26,5 +61,16 @@ internal interface IDirectoryService
     DirectoryTreeResult EnumerateTree(
         string path,
         Action<IReadOnlyList<FileSystemEntry>> publishBatch,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Copies file-system sources into a directory while reporting progress and preserving
+    /// completed files when cancellation is requested.
+    /// </summary>
+    Task<PasteResult> PasteAsync(
+        IReadOnlyList<string> sourcePaths,
+        string destinationDirectory,
+        PasteConflictResolution conflictResolution,
+        IProgress<PasteProgress>? progress,
         CancellationToken cancellationToken);
 }

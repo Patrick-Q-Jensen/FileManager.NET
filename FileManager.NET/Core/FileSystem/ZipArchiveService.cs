@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Diagnostics;
 using System.IO.Compression;
 using Serilog;
 
@@ -208,10 +210,17 @@ internal sealed class ZipArchiveService
         string archivePath,
         string archiveDirectory,
         IReadOnlyList<string> sourcePaths,
-        ZipConflictResolution conflictResolution)
+        ZipConflictResolution conflictResolution,
+        IProgress<PasteProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         var errors = new List<string>();
+        var reporter = new ZipPasteProgressReporter(progress);
+        reporter.Report(new PasteProgress(
+            PasteProgressPhase.Preparing, null, 0, 0, 0, 0));
+        cancellationToken.ThrowIfCancellationRequested();
         var listing = LoadDirectory(archivePath, archiveDirectory);
+        cancellationToken.ThrowIfCancellationRequested();
         if (listing.Error is not null)
         {
             return new ZipMutationResult(0, [listing.Error]);
@@ -226,6 +235,7 @@ internal sealed class ZipArchiveService
 
         foreach (var sourcePath in sourcePaths)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var trimmedPath = sourcePath.TrimEnd(
@@ -288,12 +298,25 @@ internal sealed class ZipArchiveService
         }
 
         var collectionErrors = new List<string>();
-        var sources = CollectSources(additions, collectionErrors);
+        var sources = CollectSources(
+            additions,
+            collectionErrors,
+            cancellationToken,
+            reporter);
         if (collectionErrors.Count > 0)
         {
             return new ZipMutationResult(0, [.. errors, .. collectionErrors]);
         }
 
+        var filesProcessed = 0;
+        reporter.Report(new PasteProgress(
+            PasteProgressPhase.Rebuilding,
+            archivePath,
+            0,
+            sources.FileCount,
+            0,
+            0),
+            force: true);
         var result = RewriteArchive(
             archivePath,
             (path, _) => replacePaths.Any(replace =>
@@ -305,19 +328,43 @@ internal sealed class ZipArchiveService
             {
                 foreach (var source in sources)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (source.IsDirectory)
                     {
                         output.CreateEntry(EnsureDirectoryEntryName(source.EntryName));
                     }
                     else
                     {
-                        AddFile(output, source.FullPath, source.EntryName);
+                        AddFile(output, source.FullPath, source.EntryName, cancellationToken);
+                        filesProcessed++;
+                        reporter.Report(new PasteProgress(
+                            PasteProgressPhase.Copying,
+                            source.FullPath,
+                            filesProcessed,
+                            sources.FileCount,
+                            0,
+                            0));
                     }
                 }
             },
-            additions.Count);
+            additions.Count,
+            cancellationToken);
+        if (!result.Cancelled)
+        {
+            reporter.Report(new PasteProgress(
+                PasteProgressPhase.Finalizing,
+                null,
+                filesProcessed,
+                sources.FileCount,
+                0,
+                0),
+                force: true);
+        }
 
-        return new ZipMutationResult(result.ItemsChanged, [.. errors, .. result.Errors]);
+        return new ZipMutationResult(
+            result.ItemsChanged,
+            [.. errors, .. result.Errors],
+            result.Cancelled);
     }
 
     public ZipArchiveResult Create(
@@ -367,7 +414,7 @@ internal sealed class ZipArchiveService
                     }
                     else
                     {
-                        AddFile(archive, source.FullPath, source.EntryName);
+                        AddFile(archive, source.FullPath, source.EntryName, CancellationToken.None);
                         filesAdded++;
                     }
                 }
@@ -400,25 +447,43 @@ internal sealed class ZipArchiveService
         return new ZipArchiveResult(archivePath, filesAdded, errors);
     }
 
-    private static ArchiveSources CollectSources(IReadOnlyList<FileSystemEntry> entries, List<string> errors)
+    private static ArchiveSources CollectSources(
+        IReadOnlyList<FileSystemEntry> entries,
+        List<string> errors,
+        CancellationToken cancellationToken = default,
+        ZipPasteProgressReporter? reporter = null)
     {
         var sources = new ArchiveSources();
         foreach (var entry in entries)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (entry.IsDirectory)
             {
-                CollectDirectory(entry.FullPath, entry.Name, sources, errors);
+                CollectDirectory(
+                    entry.FullPath,
+                    entry.Name,
+                    sources,
+                    errors,
+                    cancellationToken,
+                    reporter);
             }
             else
             {
                 sources.AddFile(entry.FullPath, entry.Name);
+                ReportCollectedSources(sources, entry.FullPath, reporter);
             }
         }
 
         return sources;
     }
 
-    private static void CollectDirectory(string directoryPath, string entryName, ArchiveSources sources, List<string> errors)
+    private static void CollectDirectory(
+        string directoryPath,
+        string entryName,
+        ArchiveSources sources,
+        List<string> errors,
+        CancellationToken cancellationToken,
+        ZipPasteProgressReporter? reporter)
     {
         try
         {
@@ -428,6 +493,7 @@ internal sealed class ZipArchiveService
 
             while (pendingDirectories.TryPop(out var directory))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 IEnumerable<string> children;
                 try
                 {
@@ -444,6 +510,7 @@ internal sealed class ZipArchiveService
                 {
                     foreach (var childPath in children)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         try
                         {
                             var attributes = File.GetAttributes(childPath);
@@ -451,6 +518,7 @@ internal sealed class ZipArchiveService
                             if ((attributes & FileAttributes.Directory) == 0)
                             {
                                 sources.AddFile(childPath, childEntryName);
+                                ReportCollectedSources(sources, childPath, reporter);
                             }
                             else if ((attributes & FileAttributes.ReparsePoint) != 0)
                             {
@@ -483,12 +551,55 @@ internal sealed class ZipArchiveService
         }
     }
 
-    private static void AddFile(ZipArchive archive, string sourcePath, string entryName)
+    private static void ReportCollectedSources(
+        ArchiveSources sources,
+        string path,
+        ZipPasteProgressReporter? reporter) =>
+        reporter?.Report(new PasteProgress(
+            PasteProgressPhase.Preparing,
+            path,
+            0,
+            sources.FileCount,
+            0,
+            0));
+
+    private static void AddFile(
+        ZipArchive archive,
+        string sourcePath,
+        string entryName,
+        CancellationToken cancellationToken)
     {
         var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
         using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         using var destination = entry.Open();
-        source.CopyTo(destination);
+        CopyStream(source, destination, cancellationToken);
+    }
+
+    private static void CopyStream(
+        Stream source,
+        Stream destination,
+        CancellationToken cancellationToken)
+    {
+        const int bufferSize = 1024 * 1024;
+        var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var bytesRead = source.Read(buffer, 0, bufferSize);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                destination.Write(buffer, 0, bytesRead);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static string EnsureDirectoryEntryName(string entryName) => $"{entryName.TrimEnd('/')}/";
@@ -634,7 +745,8 @@ internal sealed class ZipArchiveService
         string archivePath,
         Func<string, bool, string?> mapEntry,
         Action<ZipArchive>? appendEntries,
-        int itemsChanged)
+        int itemsChanged,
+        CancellationToken cancellationToken = default)
     {
         var tempPath = $"{archivePath}.{Guid.NewGuid():N}.tmp";
         try
@@ -648,6 +760,7 @@ internal sealed class ZipArchiveService
             {
                 foreach (var inputEntry in input.Entries)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var isDirectory = inputEntry.FullName.EndsWith('/')
                                       || inputEntry.FullName.EndsWith('\\');
                     var normalized = TryNormalizeArchivePath(
@@ -670,16 +783,22 @@ internal sealed class ZipArchiveService
                     {
                         using var source = inputEntry.Open();
                         using var destination = outputEntry.Open();
-                        source.CopyTo(destination);
+                        CopyStream(source, destination, cancellationToken);
                     }
                 }
 
                 appendEntries?.Invoke(output);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             File.Move(tempPath, archivePath, overwrite: true);
             Invalidate(archivePath);
             return new ZipMutationResult(itemsChanged, []);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            TryDeleteIncompleteArchive(tempPath);
+            return new ZipMutationResult(0, [], true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
         {
@@ -858,6 +977,25 @@ internal sealed class ZipArchiveService
 
     private sealed record ArchiveSource(string FullPath, string EntryName, bool IsDirectory);
 
+    private sealed class ZipPasteProgressReporter(IProgress<PasteProgress>? progress)
+    {
+        private static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(100);
+        private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+        private long _lastReportMilliseconds = -100;
+
+        public void Report(PasteProgress update, bool force = false)
+        {
+            var elapsed = _stopwatch.ElapsedMilliseconds;
+            if (!force && elapsed - _lastReportMilliseconds < Interval.TotalMilliseconds)
+            {
+                return;
+            }
+
+            _lastReportMilliseconds = elapsed;
+            progress?.Report(update);
+        }
+    }
+
     private sealed record IndexedArchiveEntry(
         string Path,
         bool IsDirectory,
@@ -892,4 +1030,7 @@ internal enum ZipConflictResolution
     Duplicate,
 }
 
-internal sealed record ZipMutationResult(int ItemsChanged, IReadOnlyList<string> Errors);
+internal sealed record ZipMutationResult(
+    int ItemsChanged,
+    IReadOnlyList<string> Errors,
+    bool Cancelled = false);

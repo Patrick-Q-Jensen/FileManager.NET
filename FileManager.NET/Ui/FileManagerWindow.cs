@@ -1194,60 +1194,37 @@ internal sealed class FileManagerWindow : Window
             }
         }
 
-        int ok = 0;
-        string? firstError = null;
-
-        foreach (var source in sources)
+        var resolution = conflictChoice switch
         {
-            var name = Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            if (string.IsNullOrEmpty(name))
-                name = source;
+            ConflictChoice.Replace => PasteConflictResolution.Replace,
+            ConflictChoice.Duplicate => PasteConflictResolution.Duplicate,
+            _ => PasteConflictResolution.None,
+        };
+        var destinationDirectory = _controller.CurrentDirectory;
+        var result = RunPasteOperation(
+            "Pasting Files",
+            (progress, cancellationToken) => _directoryService.PasteAsync(
+                sources,
+                destinationDirectory,
+                resolution,
+                progress,
+                cancellationToken),
+            out var failure);
 
-            bool isConflict = File.Exists(Path.Combine(_controller.CurrentDirectory, name))
-                           || Directory.Exists(Path.Combine(_controller.CurrentDirectory, name));
-
-            bool sourceIsDirectory = Directory.Exists(source);
-
-            var dest = isConflict && conflictChoice == ConflictChoice.Duplicate
-                ? GetUniqueDestPath(_controller.CurrentDirectory, name, sourceIsDirectory)
-                : Path.Combine(_controller.CurrentDirectory, name);
-
-            try
-            {
-                if (sourceIsDirectory)
-                {
-                    if (isConflict && conflictChoice == ConflictChoice.Replace)
-                        MergeDirectory(source, dest);
-                    else
-                        CopyDirectory(source, dest);
-                }
-                else
-                {
-                    File.Copy(source, dest, overwrite: isConflict && conflictChoice == ConflictChoice.Replace);
-                }
-
-                ok++;
-            }
-            catch (Exception ex)
-            {
-                firstError ??= $"{name}: {ex.Message}";
-                Log.Warning(ex, "Failed to paste {Source} to {Dest}", source, dest);
-            }
+        if (result is null)
+        {
+            _controller.SetStatus($"Paste failed: {failure}");
+            return;
         }
 
-        if (ok > 0)
+        if (result.ItemsChanged)
         {
             RefreshAfterMutation(
                 updateFlattenedView: StartFlattenOperation,
                 updateDirectoryView: () => _controller.EnterDirectory(_controller.CurrentDirectory));
         }
 
-        int total = sources.Count;
-        _controller.SetStatus(firstError is null
-            ? $"Pasted {ok} {(ok == 1 ? "item" : "items")}."
-            : ok > 0
-                ? $"Pasted {ok}/{total}: {firstError}"
-                : $"Paste failed: {firstError}");
+        _controller.SetStatus(FormatPasteResult(result));
     }
 
     private void PasteIntoArchive(IReadOnlyList<string> sources)
@@ -1284,17 +1261,35 @@ internal sealed class FileManagerWindow : Window
             }
         }
 
-        var result = RunBackgroundOperation(
-            "Updating ZIP Archive",
-            "Adding items and rebuilding archive…",
-            () => _zipArchiveService.AddEntries(
-                location.PhysicalPath,
-                location.ArchiveDirectory!,
-                sources,
-                choice == ConflictChoice.Duplicate
-                    ? ZipConflictResolution.Duplicate
-                    : ZipConflictResolution.Replace),
+        var result = RunPasteOperation(
+            "Pasting into ZIP Archive",
+            (progress, cancellationToken) => Task.Run(() =>
+                {
+                    try
+                    {
+                        return _zipArchiveService.AddEntries(
+                            location.PhysicalPath,
+                            location.ArchiveDirectory!,
+                            sources,
+                            choice == ConflictChoice.Duplicate
+                                ? ZipConflictResolution.Duplicate
+                                : ZipConflictResolution.Replace,
+                            progress,
+                            cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        return new ZipMutationResult(0, [], true);
+                    }
+                },
+                CancellationToken.None),
             out var failure);
+
+        if (result?.Cancelled == true)
+        {
+            _controller.SetStatus("Paste cancelled; the ZIP archive was not changed.");
+            return;
+        }
 
         if (result is null || result.ItemsChanged == 0)
         {
@@ -1309,6 +1304,217 @@ internal sealed class FileManagerWindow : Window
         _controller.SetStatus(result.Errors.Count == 0
             ? $"Added {result.ItemsChanged} {(result.ItemsChanged == 1 ? "item" : "items")} to archive."
             : $"Added {result.ItemsChanged} items with {result.Errors.Count} skipped.");
+    }
+
+    private T? RunPasteOperation<T>(
+        string title,
+        Func<IProgress<PasteProgress>, CancellationToken, Task<T>> operation,
+        out string? failure)
+        where T : class
+    {
+        T? result = null;
+        string? operationFailure = null;
+        var cancellationRequested = false;
+        var dialogClosed = false;
+        using var cancellation = new CancellationTokenSource();
+
+        var statusLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = "Preparing paste…",
+        };
+        var currentItemLabel = new Label
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(1),
+            Text = string.Empty,
+        };
+        var progressBar = new ProgressBar
+        {
+            X = 1,
+            Y = 4,
+            Width = Dim.Fill(1),
+            Height = 1,
+            Fraction = 0,
+        };
+        var detailLabel = new Label
+        {
+            X = 1,
+            Y = 5,
+            Width = Dim.Fill(1),
+            Text = "Scanning sources…",
+        };
+        var cancelButton = new Button
+        {
+            X = Pos.Center(),
+            Y = 7,
+            Text = "Cancel",
+        };
+        var dialog = new Dialog
+        {
+            Title = title,
+            Width = Dim.Percent(70),
+            Height = 11,
+        };
+
+        void requestCancellation()
+        {
+            if (cancellationRequested)
+            {
+                return;
+            }
+
+            cancellationRequested = true;
+            cancellation.Cancel();
+            cancelButton.Enabled = false;
+            statusLabel.Text = "Cancelling…";
+            dialog.SetNeedsDraw();
+        }
+
+        cancelButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            requestCancellation();
+        };
+        dialog.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode == KeyCode.Esc)
+            {
+                key.Handled = true;
+                requestCancellation();
+            }
+        };
+        dialog.Add(statusLabel, currentItemLabel, progressBar, detailLabel, cancelButton);
+
+        var progress = new Progress<PasteProgress>(update => _app.Invoke(() =>
+        {
+            if (dialogClosed)
+            {
+                return;
+            }
+
+            if (!cancellationRequested)
+            {
+                statusLabel.Text = update.Phase switch
+                {
+                    PasteProgressPhase.Preparing => "Preparing paste…",
+                    PasteProgressPhase.Rebuilding => "Rebuilding archive…",
+                    PasteProgressPhase.Finalizing => "Finalizing…",
+                    _ => "Pasting files…",
+                };
+            }
+
+            currentItemLabel.Text = update.CurrentPath is null
+                ? string.Empty
+                : Path.GetFileName(update.CurrentPath);
+            progressBar.Fraction = GetPasteFraction(update);
+            detailLabel.Text = update.Phase switch
+            {
+                PasteProgressPhase.Preparing when update.TotalBytes > 0 =>
+                    $"Found {update.TotalFiles:N0} files ({FormatByteCount(update.TotalBytes)})",
+                PasteProgressPhase.Preparing =>
+                    $"Found {update.TotalFiles:N0} files",
+                PasteProgressPhase.Rebuilding =>
+                    "The original archive remains unchanged until this completes.",
+                PasteProgressPhase.Finalizing =>
+                    $"{update.FilesCompleted:N0}/{update.TotalFiles:N0} files completed",
+                _ when update.TotalBytes > 0 =>
+                    $"{update.FilesCompleted:N0}/{update.TotalFiles:N0} files  |  "
+                    + $"{FormatByteCount(update.BytesCopied)} / {FormatByteCount(update.TotalBytes)}",
+                _ => $"{update.FilesCompleted:N0}/{update.TotalFiles:N0} files",
+            };
+            dialog.SetNeedsDraw();
+        }));
+
+        Task<T> task;
+        try
+        {
+            task = operation(progress, cancellation.Token);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "{Operation} failed to start", title);
+            failure = ex.Message;
+            return null;
+        }
+
+        _ = task.ContinueWith(completedTask =>
+        {
+            _app.Invoke(() =>
+            {
+                dialogClosed = true;
+                if (completedTask.IsCompletedSuccessfully)
+                {
+                    result = completedTask.Result;
+                }
+                else if (!completedTask.IsCanceled)
+                {
+                    operationFailure = completedTask.Exception?.GetBaseException().Message
+                        ?? "An unexpected error occurred.";
+                    Log.Error(completedTask.Exception, "{Operation} failed unexpectedly", title);
+                }
+
+                _app.RequestStop(dialog);
+            });
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+
+        cancelButton.SetFocus();
+        RunDialog(dialog);
+        failure = operationFailure;
+        return result;
+    }
+
+    private static float GetPasteFraction(PasteProgress progress)
+    {
+        if (progress.Phase == PasteProgressPhase.Finalizing)
+        {
+            return 1;
+        }
+
+        if (progress.TotalBytes > 0)
+        {
+            return (float)Math.Clamp(
+                (double)progress.BytesCopied / progress.TotalBytes,
+                0,
+                1);
+        }
+
+        return progress.TotalFiles > 0
+            ? (float)Math.Clamp((double)progress.FilesCompleted / progress.TotalFiles, 0, 1)
+            : 0;
+    }
+
+    private static string FormatPasteResult(PasteResult result)
+    {
+        if (!result.Cancelled && !result.ItemsChanged && result.Errors.Count > 0)
+        {
+            return $"Paste failed: {result.Errors[0]}";
+        }
+
+        var summary = result.Cancelled
+            ? $"Paste cancelled after {result.FilesCopied:N0} files and {result.DirectoriesCreated:N0} folders"
+            : $"Pasted {result.FilesCopied:N0} files and {result.DirectoriesCreated:N0} folders";
+
+        return result.Errors.Count == 0
+            ? summary
+            : $"{summary}; {result.Errors.Count:N0} skipped — {result.Errors[0]}";
+    }
+
+    private static string FormatByteCount(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB", "PB"];
+        double value = bytes;
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return $"{value:0.#} {units[unit]}";
     }
 
     // Terminal.Gui sets Console.Title to the dialog Title on every Run() call.
@@ -2618,32 +2824,6 @@ internal sealed class FileManagerWindow : Window
         return ellipsis + tail;
     }
 
-    private static string GetUniqueDestPath(string destDir, string name, bool isDirectory)
-    {
-        var candidate = Path.Combine(destDir, name);
-        if (!File.Exists(candidate) && !Directory.Exists(candidate))
-            return candidate;
-
-        if (isDirectory)
-        {
-            for (int n = 2; ; n++)
-            {
-                candidate = Path.Combine(destDir, $"{name} ({n})");
-                if (!File.Exists(candidate) && !Directory.Exists(candidate))
-                    return candidate;
-            }
-        }
-
-        var ext = Path.GetExtension(name);
-        var stem = Path.GetFileNameWithoutExtension(name);
-        for (int n = 2; ; n++)
-        {
-            candidate = Path.Combine(destDir, $"{stem} ({n}){ext}");
-            if (!File.Exists(candidate) && !Directory.Exists(candidate))
-                return candidate;
-        }
-    }
-
     private static IReadOnlyList<FileSystemEntry> CollapseNestedSelections(IReadOnlyList<FileSystemEntry> entries)
     {
         if (entries.Count < 2)
@@ -2715,27 +2895,6 @@ internal sealed class FileManagerWindow : Window
         0,
         DateTime.Now,
         isDirectory ? FileAttributes.Directory : FileAttributes.Normal);
-
-    private static void CopyDirectory(string source, string dest)
-    {
-        Directory.CreateDirectory(dest);
-        foreach (var file in Directory.EnumerateFiles(source))
-            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)));
-        foreach (var dir in Directory.EnumerateDirectories(source))
-            CopyDirectory(dir, Path.Combine(dest, Path.GetFileName(dir)));
-    }
-
-    // Copies the contents of source into an existing dest directory, overwriting conflicting
-    // files. Subdirectories that already exist in dest are merged recursively; new ones are
-    // created. This matches Windows Explorer's folder-conflict behaviour (merge, not replace).
-    private static void MergeDirectory(string source, string dest)
-    {
-        Directory.CreateDirectory(dest); // No-op if dest already exists.
-        foreach (var file in Directory.EnumerateFiles(source))
-            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)), overwrite: true);
-        foreach (var dir in Directory.EnumerateDirectories(source))
-            MergeDirectory(dir, Path.Combine(dest, Path.GetFileName(dir)));
-    }
 
     private string BuildStatus(int count)
     {
