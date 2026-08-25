@@ -7,6 +7,7 @@ using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
+using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using FileManager.NET.Core.Favorites;
@@ -2744,7 +2745,7 @@ internal sealed class FileManagerWindow : Window
         _filterLabel.Text = _controller.Query.Length > 0
             ? $" /{_controller.Query}"
             : " / ";
-        _statusLabel.Text = BuildStatus(entries.Count);
+        UpdateStatusText(entries.Count);
 
         SetNeedsDraw();
 
@@ -2760,6 +2761,12 @@ internal sealed class FileManagerWindow : Window
             _renderedDirectory = _controller.DisplayPath;
             DirectoryChanged?.Invoke();
         }
+    }
+
+    protected override void OnSubViewsLaidOut(LayoutEventArgs args)
+    {
+        base.OnSubViewsLaidOut(args);
+        UpdateStatusText(_controller.FilteredEntries.Count);
     }
 
     /// <summary>
@@ -2896,7 +2903,10 @@ internal sealed class FileManagerWindow : Window
         DateTime.Now,
         isDirectory ? FileAttributes.Directory : FileAttributes.Normal);
 
-    private string BuildStatus(int count)
+    private void UpdateStatusText(int count) =>
+        _statusLabel.Text = BuildStatus(count, _statusLabel.Viewport.Width);
+
+    private string BuildStatus(int count, int availableWidth)
     {
         var builder = new StringBuilder();
         builder.Append(' ').Append(count).Append(count == 1 ? " item" : " items");
@@ -2906,8 +2916,49 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  Ctrl+Alt+H help");
-        return builder.ToString();
+        builder.Append("  |  Ctrl+Alt+H help  |");
+        var status = builder.ToString();
+        var path = _controller.DisplayPath;
+
+        // Before the first layout there is no usable viewport width. Show the full path now;
+        // OnSubViewsLaidOut will constrain it as soon as the actual width is known.
+        if (availableWidth <= 0)
+        {
+            return $"{status}  {path}";
+        }
+
+        const string pathSpacing = "  ";
+        var pathWidth = availableWidth - status.GetColumns(true) - pathSpacing.Length;
+        return pathWidth > 0
+            ? $"{status}{pathSpacing}{TruncatePathTail(path, pathWidth)}"
+            : status;
+    }
+
+    private static string TruncatePathTail(string path, int maxColumns)
+    {
+        if (path.GetColumns(true) <= maxColumns)
+        {
+            return path;
+        }
+
+        const string ellipsis = "…";
+        var prefixColumns = 0;
+        var prefixLength = 0;
+        var maxPrefixColumns = maxColumns - ellipsis.GetColumns(true);
+
+        foreach (var rune in path.EnumerateRunes())
+        {
+            var runeColumns = Math.Max(0, rune.GetColumns());
+            if (prefixColumns + runeColumns > maxPrefixColumns)
+            {
+                break;
+            }
+
+            prefixColumns += runeColumns;
+            prefixLength += rune.Utf16SequenceLength;
+        }
+
+        return path[..prefixLength] + ellipsis;
     }
 
     private enum ConflictChoice { None, Replace, Duplicate }
