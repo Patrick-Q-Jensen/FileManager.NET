@@ -1162,7 +1162,7 @@ internal sealed class FileManagerWindow : Window
     {
         if (!WindowsFileClipboard.TryGetFiles(out var sources))
         {
-            _controller.SetStatus("No files on clipboard to paste.");
+            PasteVirtualFilesFromClipboard();
             return;
         }
 
@@ -1226,6 +1226,134 @@ internal sealed class FileManagerWindow : Window
         }
 
         _controller.SetStatus(FormatPasteResult(result));
+    }
+
+    private void PasteVirtualFilesFromClipboard()
+    {
+        if (!WindowsFileClipboard.TryGetVirtualFileManifest(out var manifest, out var manifestError)
+            || manifest is null)
+        {
+            _controller.SetStatus(manifestError is null
+                ? "No files on clipboard to paste."
+                : $"Paste failed: {manifestError}");
+            return;
+        }
+
+        if (_controller.IsArchive)
+        {
+            _controller.SetStatus("Remote clipboard files cannot be pasted directly into a ZIP archive.");
+            return;
+        }
+
+        var conflicts = manifest.TopLevelNames
+            .Where(name => File.Exists(Path.Combine(_controller.CurrentDirectory, name))
+                           || Directory.Exists(Path.Combine(_controller.CurrentDirectory, name)))
+            .ToList();
+
+        var conflictChoice = ConflictChoice.None;
+        if (conflicts.Count > 0)
+        {
+            conflictChoice = ShowPasteConflictDialog(conflicts);
+            if (conflictChoice == ConflictChoice.None)
+            {
+                _controller.SetStatus("Paste cancelled.");
+                return;
+            }
+        }
+
+        var resolution = conflictChoice switch
+        {
+            ConflictChoice.Replace => PasteConflictResolution.Replace,
+            ConflictChoice.Duplicate => PasteConflictResolution.Duplicate,
+            _ => PasteConflictResolution.None,
+        };
+        var destinationDirectory = _controller.CurrentDirectory;
+        var result = RunPasteOperation(
+            "Pasting Remote Files",
+            (progress, cancellationToken) => PasteVirtualFilesAsync(
+                manifest,
+                destinationDirectory,
+                resolution,
+                progress,
+                cancellationToken),
+            out var failure);
+
+        if (result is null)
+        {
+            _controller.SetStatus($"Paste failed: {failure}");
+            return;
+        }
+
+        if (result.ItemsChanged)
+        {
+            RefreshAfterMutation(
+                updateFlattenedView: StartFlattenOperation,
+                updateDirectoryView: () => _controller.EnterDirectory(_controller.CurrentDirectory));
+        }
+
+        _controller.SetStatus(FormatPasteResult(result));
+    }
+
+    private async Task<PasteResult> PasteVirtualFilesAsync(
+        VirtualFileManifest manifest,
+        string destinationDirectory,
+        PasteConflictResolution resolution,
+        IProgress<PasteProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        var materialized = await Task.Run(
+            () => WindowsFileClipboard.MaterializeVirtualFiles(
+                manifest,
+                progress,
+                cancellationToken),
+            CancellationToken.None).ConfigureAwait(false);
+
+        try
+        {
+            if (materialized.Cancelled)
+            {
+                return new PasteResult(
+                    0,
+                    materialized.TotalFiles,
+                    0,
+                    materialized.BytesReceived,
+                    materialized.TotalBytes,
+                    true,
+                    materialized.Errors);
+            }
+
+            if (materialized.SourcePaths.Count == 0)
+            {
+                return new PasteResult(
+                    0,
+                    materialized.TotalFiles,
+                    0,
+                    materialized.BytesReceived,
+                    materialized.TotalBytes,
+                    false,
+                    materialized.Errors.Count > 0
+                        ? materialized.Errors
+                        : ["No remote clipboard files were received."]);
+            }
+
+            var pasteResult = await _directoryService.PasteAsync(
+                materialized.SourcePaths,
+                destinationDirectory,
+                resolution,
+                progress,
+                cancellationToken).ConfigureAwait(false);
+
+            return materialized.Errors.Count == 0
+                ? pasteResult
+                : pasteResult with
+                {
+                    Errors = materialized.Errors.Concat(pasteResult.Errors).ToArray(),
+                };
+        }
+        finally
+        {
+            WindowsFileClipboard.TryDeleteDirectory(materialized.StagingDirectory);
+        }
     }
 
     private void PasteIntoArchive(IReadOnlyList<string> sources)
@@ -1402,6 +1530,7 @@ internal sealed class FileManagerWindow : Window
                 statusLabel.Text = update.Phase switch
                 {
                     PasteProgressPhase.Preparing => "Preparing paste…",
+                    PasteProgressPhase.Receiving => "Receiving remote files…",
                     PasteProgressPhase.Rebuilding => "Rebuilding archive…",
                     PasteProgressPhase.Finalizing => "Finalizing…",
                     _ => "Pasting files…",

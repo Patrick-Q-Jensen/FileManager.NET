@@ -19,6 +19,7 @@ internal enum PasteConflictResolution
 internal enum PasteProgressPhase
 {
     Preparing,
+    Receiving,
     Copying,
     Rebuilding,
     Finalizing,
