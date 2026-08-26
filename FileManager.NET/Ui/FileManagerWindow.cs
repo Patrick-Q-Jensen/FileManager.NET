@@ -14,6 +14,7 @@ using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Navigation;
 using FileManager.NET.Core.Sorting;
+using FileManager.NET.Core.Undo;
 using FileManager.NET.Platform;
 
 namespace FileManager.NET.Ui;
@@ -53,6 +54,7 @@ internal sealed class FileManagerWindow : Window
     private readonly ISortSettingsService _sortSettingsService;
     private readonly IFileLauncher _fileLauncher;
     private readonly ZipArchiveService _zipArchiveService;
+    private readonly UndoHistory _undoHistory;
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -105,7 +107,8 @@ internal sealed class FileManagerWindow : Window
         IFavoritesService favoritesService,
         ISortSettingsService sortSettingsService,
         IFileLauncher fileLauncher,
-        ZipArchiveService zipArchiveService)
+        ZipArchiveService zipArchiveService,
+        UndoHistory undoHistory)
     {
         _app = app;
         _controller = controller;
@@ -114,6 +117,7 @@ internal sealed class FileManagerWindow : Window
         _sortSettingsService = sortSettingsService;
         _fileLauncher = fileLauncher;
         _zipArchiveService = zipArchiveService;
+        _undoHistory = undoHistory;
 
         _filterLabel = new Label
         {
@@ -406,8 +410,12 @@ internal sealed class FileManagerWindow : Window
                 ShowExecuteDialog();
                 return true;
 
-            case KeyCode.Z:
+            case KeyCode.Z when alt:
                 CreateZipArchive();
+                return true;
+
+            case KeyCode.Z:
+                UndoLastOperation();
                 return true;
 
             case KeyCode.D:
@@ -1081,6 +1089,9 @@ internal sealed class FileManagerWindow : Window
         }
 
         var archiveEntry = CreateEntryFromDisk(result.ArchivePath, isDirectory: false);
+        _undoHistory.RecordCreatedFile(
+            archiveEntry.FullPath,
+            $"create {archiveEntry.Name}");
         RefreshAfterMutation(
             () => _controller.AddFlattenedEntry(archiveEntry),
             _controller.RefreshFromDisk);
@@ -1220,6 +1231,7 @@ internal sealed class FileManagerWindow : Window
 
         if (result.ItemsChanged)
         {
+            RecordPasteUndo(result);
             RefreshAfterMutation(
                 updateFlattenedView: StartFlattenOperation,
                 updateDirectoryView: () => _controller.EnterDirectory(_controller.CurrentDirectory));
@@ -1286,6 +1298,7 @@ internal sealed class FileManagerWindow : Window
 
         if (result.ItemsChanged)
         {
+            RecordPasteUndo(result);
             RefreshAfterMutation(
                 updateFlattenedView: StartFlattenOperation,
                 updateDirectoryView: () => _controller.EnterDirectory(_controller.CurrentDirectory));
@@ -1426,6 +1439,8 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
+        _undoHistory.RecordUnavailable(
+            "The last ZIP archive change cannot be undone without retaining a backup.");
         var firstName = Path.GetFileName(sources[0].TrimEnd(
             Path.DirectorySeparatorChar,
             Path.AltDirectorySeparatorChar));
@@ -1631,6 +1646,117 @@ internal sealed class FileManagerWindow : Window
         return result.Errors.Count == 0
             ? summary
             : $"{summary}; {result.Errors.Count:N0} skipped — {result.Errors[0]}";
+    }
+
+    private void RecordPasteUndo(PasteResult result)
+    {
+        if (result.ReplacedExisting)
+        {
+            _undoHistory.RecordUnavailable(
+                "The last replacement paste cannot be undone because replaced data is not retained.");
+            return;
+        }
+
+        if (!result.UndoTrackingComplete)
+        {
+            _undoHistory.RecordUnavailable(
+                "The last paste is too large to undo within the session history limit.");
+            return;
+        }
+
+        _undoHistory.RecordPaste(result);
+    }
+
+    private void UndoLastOperation()
+    {
+        if (!_undoHistory.HasEntries)
+        {
+            _controller.SetStatus("Nothing to undo.");
+            return;
+        }
+
+        var result = RunBackgroundOperation(
+            "Undo",
+            "Undoing the last file operation…",
+            _undoHistory.Undo,
+            out var failure);
+        if (result is null)
+        {
+            _controller.SetStatus($"Undo failed: {failure ?? "An unexpected error occurred."}");
+            return;
+        }
+
+        if (result.RemovedPaths.Count > 0 || result.MovedFromPath is not null)
+        {
+            RefreshAfterUndo(result);
+        }
+
+        _controller.SetStatus(result.Message);
+    }
+
+    private void RefreshAfterUndo(UndoResult result)
+    {
+        try
+        {
+            var location = _controller.CurrentLocation;
+            if (result.MovedFromPath is not null
+                && result.MovedToPath is not null
+                && IsSameOrDescendant(location.PhysicalPath, result.MovedFromPath))
+            {
+                var suffix = Path.GetFullPath(location.PhysicalPath)
+                    [Path.GetFullPath(result.MovedFromPath).Length..];
+                var movedLocationPath = Path.GetFullPath(result.MovedToPath) + suffix;
+                if (location.IsArchive)
+                {
+                    _controller.EnterArchive(movedLocationPath, location.ArchiveDirectory!);
+                }
+                else
+                {
+                    _controller.EnterDirectory(movedLocationPath);
+                }
+
+                return;
+            }
+
+            foreach (var removedPath in result.RemovedPaths)
+            {
+                if (!IsSameOrDescendant(location.PhysicalPath, removedPath))
+                {
+                    continue;
+                }
+
+                var parent = Path.GetDirectoryName(Path.GetFullPath(removedPath))
+                    ?? Environment.CurrentDirectory;
+                _controller.EnterDirectory(parent);
+                return;
+            }
+
+            RefreshAfterMutation(
+                updateFlattenedView: StartFlattenOperation,
+                updateDirectoryView: _controller.RefreshFromDisk);
+        }
+        catch (Exception ex) when (ex is IOException
+                                   or UnauthorizedAccessException
+                                   or ArgumentException
+                                   or NotSupportedException)
+        {
+            Log.Warning(ex, "Failed to refresh the view after undo");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Unexpected failure refreshing the view after undo");
+        }
+    }
+
+    private static bool IsSameOrDescendant(string path, string possibleParent)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var fullParent = Path.GetFullPath(possibleParent)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(fullPath, fullParent, StringComparison.OrdinalIgnoreCase)
+               || fullPath.StartsWith(
+                   $"{fullParent}{Path.DirectorySeparatorChar}",
+                   StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FormatByteCount(long bytes)
@@ -2146,6 +2272,8 @@ internal sealed class FileManagerWindow : Window
                 return;
             }
 
+            _undoHistory.RecordUnavailable(
+                "The last ZIP archive change cannot be undone without retaining a backup.");
             var location = _controller.CurrentLocation;
             _controller.EnterArchive(location.PhysicalPath, location.ArchiveDirectory!);
             _controller.SetStatus(result.Errors.Count == 0
@@ -2200,6 +2328,8 @@ internal sealed class FileManagerWindow : Window
 
         if (deleted > 0)
         {
+            _undoHistory.RecordUnavailable(
+                "The last delete cannot be undone because deleted data is not retained.");
             RefreshAfterMutation(
                 () => _controller.RemoveFlattenedEntries(deletedEntries),
                 () => _controller.EnterDirectory(_controller.CurrentDirectory));
@@ -2342,6 +2472,8 @@ internal sealed class FileManagerWindow : Window
                 return;
             }
 
+            _undoHistory.RecordUnavailable(
+                "The last ZIP archive change cannot be undone without retaining a backup.");
             _controller.ReloadSelectingEntry(newName);
             _controller.SetStatus($"Renamed: {entry.Name} → {newName}");
             return;
@@ -2367,6 +2499,7 @@ internal sealed class FileManagerWindow : Window
                 File.Move(entry.FullPath, newFullPath);
             }
 
+            _undoHistory.RecordRename(entry.FullPath, newFullPath, entry.IsDirectory);
             RefreshAfterMutation(
                 () => _controller.RenameFlattenedEntry(entry, newFullPath),
                 () => _controller.ReloadSelectingEntry(newName));
@@ -2469,6 +2602,8 @@ internal sealed class FileManagerWindow : Window
                 return;
             }
 
+            _undoHistory.RecordUnavailable(
+                "The last ZIP archive change cannot be undone without retaining a backup.");
             _controller.ReloadSelectingEntry(name);
             _controller.SetStatus($"Created {(createDirectory ? "folder" : "file")}: {name}");
             return;
@@ -2503,6 +2638,16 @@ internal sealed class FileManagerWindow : Window
             }
 
             var createdEntry = CreateEntryFromDisk(fullPath, createDirectory);
+            if (createDirectory)
+            {
+                _undoHistory.RecordCreatedDirectory(fullPath, $"create {name}");
+            }
+            else
+            {
+                _undoHistory.RecordCreatedFile(
+                    fullPath,
+                    $"create {name}");
+            }
             RefreshAfterMutation(
                 () => _controller.AddFlattenedEntry(createdEntry),
                 () => _controller.ReloadSelectingEntry(name));
@@ -2760,7 +2905,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+N          Copy selected name to clipboard",
             "  Ctrl+P          Copy selected path to clipboard",
             "  Ctrl+R          Rename selected item",
-            "  Ctrl+Z          Create ZIP archive from selected items",
+            "  Ctrl+Z          Undo last supported file operation",
             "  Ctrl+B          Toggle marking mode (hint ctrl+A will select all, ctrl+u will unselect all)",
             "  Ctrl+D          Show drive picker",
             "  Ctrl+E          Toggle flattened directory view",
@@ -2784,6 +2929,7 @@ internal sealed class FileManagerWindow : Window
             "  Ctrl+Alt+X      Run a command in the current directory",
             "  Ctrl+Alt+P      Show Windows Properties dialog",
             "  Ctrl+Alt+O      Set global sort order",
+            "  Ctrl+Alt+Z      Create ZIP archive from selected items",
         };
 
         var listView = new ListView

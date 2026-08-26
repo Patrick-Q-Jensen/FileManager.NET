@@ -11,6 +11,7 @@ using FileManager.NET.Core.Filtering;
 using FileManager.NET.Core.Navigation;
 using FileManager.NET.Core.Session;
 using FileManager.NET.Core.Sorting;
+using FileManager.NET.Core.Undo;
 using FileManager.NET.Platform;
 
 namespace FileManager.NET.Ui;
@@ -33,6 +34,7 @@ internal sealed class FileManagerTabs : Window
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
     private readonly ZipArchiveService _zipArchiveService;
+    private readonly UndoHistory _undoHistory;
     private readonly Tabs _tabs;
 
     // Guards against queuing more than one deferred tab-strip refresh at a time; rapid navigations
@@ -56,6 +58,7 @@ internal sealed class FileManagerTabs : Window
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
         _zipArchiveService = new ZipArchiveService();
+        _undoHistory = new UndoHistory();
 
         // The host window is only a full-screen frame; the Tabs container fills it and each
         // FileManagerWindow added to it becomes a tab. No outer border avoids a redundant frame
@@ -154,7 +157,8 @@ internal sealed class FileManagerTabs : Window
             _favoritesService,
             _sortSettingsService,
             _fileLauncher,
-            _zipArchiveService);
+            _zipArchiveService,
+            _undoHistory);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.

@@ -33,6 +33,18 @@ internal sealed record PasteProgress(
     long BytesCopied,
     long TotalBytes);
 
+internal sealed record PasteFileChange(
+    string Path,
+    long Length,
+    DateTime CreationTimeUtc,
+    DateTime LastWriteTimeUtc,
+    FileAttributes Attributes);
+
+internal sealed record PasteDirectoryChange(
+    string Path,
+    DateTime CreationTimeUtc,
+    FileAttributes Attributes);
+
 internal sealed record PasteResult(
     int FilesCopied,
     int TotalFiles,
@@ -43,6 +55,10 @@ internal sealed record PasteResult(
     IReadOnlyList<string> Errors)
 {
     public bool ItemsChanged => FilesCopied > 0 || DirectoriesCreated > 0;
+    public IReadOnlyList<PasteFileChange> CreatedFiles { get; init; } = [];
+    public IReadOnlyList<PasteDirectoryChange> CreatedDirectories { get; init; } = [];
+    public bool ReplacedExisting { get; init; }
+    public bool UndoTrackingComplete { get; init; } = true;
 }
 
 /// <summary>

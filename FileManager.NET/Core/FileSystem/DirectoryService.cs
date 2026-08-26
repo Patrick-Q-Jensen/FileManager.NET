@@ -12,6 +12,7 @@ internal sealed class DirectoryService : IDirectoryService
 {
     private const int TreeBatchSize = 256;
     private const int CopyBufferSize = 1024 * 1024;
+    private const int MaxTrackedUndoPaths = 10_000;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(100);
 
     public DirectoryListing Load(string path)
@@ -173,6 +174,10 @@ internal sealed class DirectoryService : IDirectoryService
         var plan = new PastePlan();
         var filesCopied = 0;
         var directoriesCreated = 0;
+        var createdFiles = new List<PasteFileChange>();
+        var createdDirectories = new List<PasteDirectoryChange>();
+        var replacedExisting = false;
+        var undoTrackingComplete = true;
         long bytesCopied = 0;
 
         try
@@ -205,6 +210,21 @@ internal sealed class DirectoryService : IDirectoryService
                     {
                         Directory.CreateDirectory(directory);
                         directoriesCreated++;
+                        if (createdFiles.Count + createdDirectories.Count < MaxTrackedUndoPaths)
+                        {
+                            if (TryCaptureCreatedDirectory(directory, out var createdDirectory))
+                            {
+                                createdDirectories.Add(createdDirectory);
+                            }
+                            else
+                            {
+                                undoTrackingComplete = false;
+                            }
+                        }
+                        else
+                        {
+                            undoTrackingComplete = false;
+                        }
                     }
                 }
                 catch (Exception ex) when (IsExpectedFileSystemException(ex))
@@ -233,6 +253,28 @@ internal sealed class DirectoryService : IDirectoryService
 
                     bytesCopied += fileBytes;
                     filesCopied++;
+                    if (file.Overwrite)
+                    {
+                        replacedExisting = true;
+                    }
+                    else
+                    {
+                        if (createdFiles.Count + createdDirectories.Count < MaxTrackedUndoPaths)
+                        {
+                            if (TryCaptureCreatedFile(file.DestinationPath, out var createdFile))
+                            {
+                                createdFiles.Add(createdFile);
+                            }
+                            else
+                            {
+                                undoTrackingComplete = false;
+                            }
+                        }
+                        else
+                        {
+                            undoTrackingComplete = false;
+                        }
+                    }
                     reporter.Report(
                         PasteProgressPhase.Copying,
                         file.SourcePath,
@@ -267,7 +309,13 @@ internal sealed class DirectoryService : IDirectoryService
                 bytesCopied,
                 plan.TotalBytes,
                 true,
-                errors);
+                errors)
+            {
+                CreatedFiles = createdFiles,
+                CreatedDirectories = createdDirectories,
+                ReplacedExisting = replacedExisting,
+                UndoTrackingComplete = undoTrackingComplete,
+            };
         }
         catch (Exception ex)
         {
@@ -282,7 +330,13 @@ internal sealed class DirectoryService : IDirectoryService
             bytesCopied,
             plan.TotalBytes,
             false,
-            errors);
+            errors)
+        {
+            CreatedFiles = createdFiles,
+            CreatedDirectories = createdDirectories,
+            ReplacedExisting = replacedExisting,
+            UndoTrackingComplete = undoTrackingComplete,
+        };
     }
 
     private static void BuildPastePlan(
@@ -456,7 +510,8 @@ internal sealed class DirectoryService : IDirectoryService
         plan.Files.Add(new PasteFile(
             source.FullName,
             destinationPath,
-            source.LastWriteTime,
+            length,
+            source.LastWriteTimeUtc,
             source.Attributes,
             overwrite));
         plan.TotalBytes = AddWithoutOverflow(plan.TotalBytes, length);
@@ -534,12 +589,54 @@ internal sealed class DirectoryService : IDirectoryService
     {
         try
         {
-            File.SetLastWriteTime(file.DestinationPath, file.LastWriteTime);
+            File.SetLastWriteTimeUtc(file.DestinationPath, file.LastWriteTimeUtc);
             File.SetAttributes(file.DestinationPath, file.Attributes);
         }
         catch (Exception ex) when (IsExpectedFileSystemException(ex))
         {
             Log.Warning(ex, "Pasted {Path} but failed to preserve its metadata", file.DestinationPath);
+        }
+    }
+
+    private static bool TryCaptureCreatedFile(string path, out PasteFileChange change)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            change = new PasteFileChange(
+                path,
+                info.Length,
+                info.CreationTimeUtc,
+                info.LastWriteTimeUtc,
+                info.Attributes);
+            return true;
+        }
+        catch (Exception ex) when (IsExpectedFileSystemException(ex))
+        {
+            Log.Warning(ex, "Pasted {Path} but failed to capture undo metadata", path);
+            change = null!;
+            return false;
+        }
+    }
+
+    private static bool TryCaptureCreatedDirectory(
+        string path,
+        out PasteDirectoryChange change)
+    {
+        try
+        {
+            var info = new DirectoryInfo(path);
+            change = new PasteDirectoryChange(
+                path,
+                info.CreationTimeUtc,
+                info.Attributes);
+            return true;
+        }
+        catch (Exception ex) when (IsExpectedFileSystemException(ex))
+        {
+            Log.Warning(ex, "Created pasted directory {Path} but failed to capture undo metadata", path);
+            change = null!;
+            return false;
         }
     }
 
@@ -590,7 +687,8 @@ internal sealed class DirectoryService : IDirectoryService
     private sealed record PasteFile(
         string SourcePath,
         string DestinationPath,
-        DateTime LastWriteTime,
+        long Length,
+        DateTime LastWriteTimeUtc,
         FileAttributes Attributes,
         bool Overwrite);
 
