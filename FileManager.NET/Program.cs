@@ -4,6 +4,7 @@ using Terminal.Gui.App;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
+using FileManager.NET.Core.Git;
 using FileManager.NET.Core.Session;
 using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
@@ -36,6 +37,7 @@ namespace FileManager.NET
 
                 IDirectoryService directoryService = new DirectoryService();
                 IEntryFilter filter = new SubstringEntryFilter();
+                IGitRepositoryService gitRepositoryService = new GitRepositoryService();
                 IFileLauncher launcher = new WindowsFileLauncher();
 
                 // Start loading favorites from disk in the background so it never delays startup.
@@ -53,7 +55,16 @@ namespace FileManager.NET
                 using IApplication app = Application.Create();
                 app.Init();
 
-                using FileManagerTabs tabs = new FileManagerTabs(app, directoryService, filter, launcher, favorites, sortSettings, startDirectory, sessionState);
+                using FileManagerTabs tabs = new FileManagerTabs(
+                    app,
+                    directoryService,
+                    filter,
+                    gitRepositoryService,
+                    launcher,
+                    favorites,
+                    sortSettings,
+                    startDirectory,
+                    sessionState);
                 try
                 {
                     app.Run(tabs);
@@ -102,4 +113,3 @@ namespace FileManager.NET
         }
     }
 }
-

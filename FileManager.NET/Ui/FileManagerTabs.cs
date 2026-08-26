@@ -8,6 +8,7 @@ using Serilog;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
+using FileManager.NET.Core.Git;
 using FileManager.NET.Core.Navigation;
 using FileManager.NET.Core.Session;
 using FileManager.NET.Core.Sorting;
@@ -30,6 +31,7 @@ internal sealed class FileManagerTabs : Window
     private readonly IApplication _app;
     private readonly IDirectoryService _directoryService;
     private readonly IEntryFilter _entryFilter;
+    private readonly IGitRepositoryService _gitRepositoryService;
     private readonly IFileLauncher _fileLauncher;
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
@@ -45,6 +47,7 @@ internal sealed class FileManagerTabs : Window
         IApplication app,
         IDirectoryService directoryService,
         IEntryFilter entryFilter,
+        IGitRepositoryService gitRepositoryService,
         IFileLauncher fileLauncher,
         IFavoritesService favoritesService,
         ISortSettingsService sortSettingsService,
@@ -54,6 +57,7 @@ internal sealed class FileManagerTabs : Window
         _app = app;
         _directoryService = directoryService;
         _entryFilter = entryFilter;
+        _gitRepositoryService = gitRepositoryService;
         _fileLauncher = fileLauncher;
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
@@ -158,7 +162,8 @@ internal sealed class FileManagerTabs : Window
             _sortSettingsService,
             _fileLauncher,
             _zipArchiveService,
-            _undoHistory);
+            _undoHistory,
+            _gitRepositoryService);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.

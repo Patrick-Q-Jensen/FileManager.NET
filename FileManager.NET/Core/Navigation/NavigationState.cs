@@ -1,4 +1,5 @@
 using FileManager.NET.Core.FileSystem;
+using FileManager.NET.Core.Git;
 
 namespace FileManager.NET.Core.Navigation;
 
@@ -15,6 +16,8 @@ internal sealed class NavigationState
     public string Query { get; set; } = string.Empty;
 
     public string? StatusMessage { get; set; }
+
+    public GitRepositoryInfo? GitRepository { get; set; }
 
     public IReadOnlyList<FileSystemEntry> AllEntries { get; set; } = Array.Empty<FileSystemEntry>();
 

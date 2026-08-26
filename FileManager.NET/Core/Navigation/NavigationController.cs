@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using FileManager.NET.Core.FileSystem;
 using FileManager.NET.Core.Filtering;
+using FileManager.NET.Core.Git;
 using FileManager.NET.Core.Sorting;
 using FileManager.NET.Platform;
 using Serilog;
@@ -81,6 +82,8 @@ internal sealed class NavigationController
     public string Query => _state.Query;
 
     public string? StatusMessage => _state.StatusMessage;
+
+    public GitRepositoryInfo? GitRepository => _state.GitRepository;
 
     public IReadOnlyList<FileSystemEntry> FilteredEntries => _state.FilteredEntries;
 
@@ -170,11 +173,16 @@ internal sealed class NavigationController
 
     private void ApplyListing(NavigationLocation location, DirectoryListing listing)
     {
+        var locationChanged = _state.Location != location;
         ResetFlattenState();
         _state.Location = location;
         _state.AllEntries = listing.Entries.ToList();
         _state.Query = string.Empty;
         _state.StatusMessage = listing.Error;
+        if (locationChanged)
+        {
+            _state.GitRepository = null;
+        }
         ApplyFilter();
         Changed?.Invoke();
     }
@@ -583,6 +591,19 @@ internal sealed class NavigationController
     public void SetStatus(string? message)
     {
         _state.StatusMessage = message;
+        Changed?.Invoke();
+    }
+
+    public void SetGitRepository(
+        NavigationLocation location,
+        GitRepositoryInfo? repository)
+    {
+        if (_state.Location != location || _state.GitRepository == repository)
+        {
+            return;
+        }
+
+        _state.GitRepository = repository;
         Changed?.Invoke();
     }
 

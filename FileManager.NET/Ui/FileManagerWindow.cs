@@ -12,6 +12,7 @@ using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using FileManager.NET.Core.Favorites;
 using FileManager.NET.Core.FileSystem;
+using FileManager.NET.Core.Git;
 using FileManager.NET.Core.Navigation;
 using FileManager.NET.Core.Sorting;
 using FileManager.NET.Core.Undo;
@@ -55,6 +56,7 @@ internal sealed class FileManagerWindow : Window
     private readonly IFileLauncher _fileLauncher;
     private readonly ZipArchiveService _zipArchiveService;
     private readonly UndoHistory _undoHistory;
+    private readonly IGitRepositoryService _gitRepositoryService;
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -72,6 +74,8 @@ internal sealed class FileManagerWindow : Window
     private bool _archiveRefreshRunning;
     private FlattenOperation? _flattenOperation;
     private object? _flattenRefreshToken;
+    private CancellationTokenSource? _gitProbeCancellation;
+    private bool _disposed;
 
     /// <summary>
     /// Raised when this tab has navigated to a different directory (and therefore its tab header
@@ -108,7 +112,8 @@ internal sealed class FileManagerWindow : Window
         ISortSettingsService sortSettingsService,
         IFileLauncher fileLauncher,
         ZipArchiveService zipArchiveService,
-        UndoHistory undoHistory)
+        UndoHistory undoHistory,
+        IGitRepositoryService gitRepositoryService)
     {
         _app = app;
         _controller = controller;
@@ -118,6 +123,7 @@ internal sealed class FileManagerWindow : Window
         _fileLauncher = fileLauncher;
         _zipArchiveService = zipArchiveService;
         _undoHistory = undoHistory;
+        _gitRepositoryService = gitRepositoryService;
 
         _filterLabel = new Label
         {
@@ -240,6 +246,8 @@ internal sealed class FileManagerWindow : Window
     {
         if (disposing)
         {
+            _disposed = true;
+            CancelGitProbe();
             StopFlattenOperation();
             _controller.Changed -= Refresh;
             _favoritesService.ErrorOccurred -= OnFavoritesError;
@@ -252,6 +260,106 @@ internal sealed class FileManagerWindow : Window
         }
 
         base.Dispose(disposing);
+    }
+
+    private void BeginGitProbe(NavigationLocation location)
+    {
+        CancelGitProbe();
+        if (location.IsArchive)
+        {
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        var cancellationToken = cancellation.Token;
+        _gitProbeCancellation = cancellation;
+
+        Task<GitRepositoryInfo?> task;
+        try
+        {
+            task = Task.Run(
+                () => _gitRepositoryService.DetectAsync(
+                    location.PhysicalPath,
+                    cancellationToken),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            ReleaseGitProbe(cancellation);
+            Log.Error(ex, "Failed to start Git repository detection for {Directory}", location.PhysicalPath);
+            return;
+        }
+
+        _ = task.ContinueWith(completedTask =>
+        {
+            if (_disposed)
+            {
+                ReleaseGitProbe(cancellation);
+                return;
+            }
+
+            _app.Invoke(() =>
+            {
+                try
+                {
+                    if (!ReferenceEquals(_gitProbeCancellation, cancellation)
+                        || cancellationToken.IsCancellationRequested
+                        || _controller.CurrentLocation != location)
+                    {
+                        return;
+                    }
+
+                    if (completedTask.IsCompletedSuccessfully)
+                    {
+                        _controller.SetGitRepository(location, completedTask.Result);
+                    }
+                    else if (!completedTask.IsCanceled)
+                    {
+                        Log.Error(
+                            completedTask.Exception,
+                            "Git repository detection failed unexpectedly for {Directory}",
+                            location.PhysicalPath);
+                    }
+                }
+                finally
+                {
+                    ReleaseGitProbe(cancellation);
+                }
+            });
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+    }
+
+    private void CancelGitProbe()
+    {
+        var cancellation = Interlocked.Exchange(ref _gitProbeCancellation, null);
+        if (cancellation is not null)
+        {
+            try
+            {
+                cancellation.Cancel();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to cancel Git repository detection");
+            }
+            finally
+            {
+                cancellation.Dispose();
+            }
+        }
+    }
+
+    private void ReleaseGitProbe(CancellationTokenSource cancellation)
+    {
+        if (ReferenceEquals(
+                Interlocked.CompareExchange(
+                    ref _gitProbeCancellation,
+                    null,
+                    cancellation),
+                cancellation))
+        {
+            cancellation.Dispose();
+        }
     }
 
     private void OnCharacterTyped(char character) => _controller.AppendToQuery(character);
@@ -3034,6 +3142,7 @@ internal sealed class FileManagerWindow : Window
         if (!string.Equals(_renderedDirectory, _controller.DisplayPath, StringComparison.Ordinal))
         {
             _renderedDirectory = _controller.DisplayPath;
+            BeginGitProbe(_controller.CurrentLocation);
             DirectoryChanged?.Invoke();
         }
     }
@@ -3191,29 +3300,104 @@ internal sealed class FileManagerWindow : Window
             builder.Append("  |  ").Append(_controller.StatusMessage);
         }
 
-        builder.Append("  |  Ctrl+Alt+H help  |");
+        builder.Append("  |  Ctrl+Alt+H help");
         var status = builder.ToString();
         var path = _controller.DisplayPath;
+        var repository = _controller.GitRepository;
+        var branch = repository?.Branch;
+        var remote = repository?.RemoteRepository;
 
         // Before the first layout there is no usable viewport width. Show the full path now;
         // OnSubViewsLaidOut will constrain it as soon as the actual width is known.
         if (availableWidth <= 0)
         {
-            return $"{status}  {path}";
+            return ComposeStatus(status, path, branch, remote);
         }
 
-        const string pathSpacing = "  ";
-        var pathWidth = availableWidth - status.GetColumns(true) - pathSpacing.Length;
-        return pathWidth > 0
-            ? $"{status}{pathSpacing}{TruncatePathTail(path, pathWidth)}"
-            : status;
+        const int separatorWidth = 5; // "  |  "
+        var statusWidth = status.GetColumns(true);
+        if (statusWidth >= availableWidth)
+        {
+            return status;
+        }
+
+        var pathWidth = path.GetColumns(true);
+        var branchWidth = branch?.GetColumns(true) ?? 0;
+        var remoteWidth = remote?.GetColumns(true) ?? 0;
+        var componentCount = 1 + (branch is null ? 0 : 1) + (remote is null ? 0 : 1);
+        var overflow = statusWidth
+                       + componentCount * separatorWidth
+                       + pathWidth
+                       + branchWidth
+                       + remoteWidth
+                       - availableWidth;
+
+        // Preserve the branch for longest: reduce or remove remote first, then path, then branch.
+        ReduceWidth(ref remoteWidth, remote is null ? 0 : 1, ref overflow);
+        if (overflow > 0 && remote is not null)
+        {
+            overflow -= remoteWidth + separatorWidth;
+            remote = null;
+        }
+
+        ReduceWidth(ref pathWidth, 1, ref overflow);
+        if (overflow > 0)
+        {
+            overflow -= pathWidth + separatorWidth;
+            path = string.Empty;
+        }
+
+        ReduceWidth(ref branchWidth, branch is null ? 0 : 1, ref overflow);
+        if (overflow > 0 || branchWidth == 0)
+        {
+            branch = null;
+        }
+
+        return ComposeStatus(
+            status,
+            path.Length == 0 ? null : TruncateTail(path, pathWidth),
+            branch is null ? null : TruncateTail(branch, branchWidth),
+            remote is null ? null : TruncateTail(remote, remoteWidth));
     }
 
-    private static string TruncatePathTail(string path, int maxColumns)
+    private static void ReduceWidth(ref int width, int minimum, ref int overflow)
     {
-        if (path.GetColumns(true) <= maxColumns)
+        if (overflow <= 0 || width <= minimum)
         {
-            return path;
+            return;
+        }
+
+        var reduction = Math.Min(overflow, width - minimum);
+        width -= reduction;
+        overflow -= reduction;
+    }
+
+    private static string ComposeStatus(
+        string status,
+        string? path,
+        string? branch,
+        string? remote)
+    {
+        var builder = new StringBuilder(status);
+        AppendStatusComponent(builder, path);
+        AppendStatusComponent(builder, branch);
+        AppendStatusComponent(builder, remote);
+        return builder.ToString();
+    }
+
+    private static void AppendStatusComponent(StringBuilder builder, string? value)
+    {
+        if (!string.IsNullOrEmpty(value))
+        {
+            builder.Append("  |  ").Append(value);
+        }
+    }
+
+    private static string TruncateTail(string value, int maxColumns)
+    {
+        if (value.GetColumns(true) <= maxColumns)
+        {
+            return value;
         }
 
         const string ellipsis = "…";
@@ -3221,7 +3405,7 @@ internal sealed class FileManagerWindow : Window
         var prefixLength = 0;
         var maxPrefixColumns = maxColumns - ellipsis.GetColumns(true);
 
-        foreach (var rune in path.EnumerateRunes())
+        foreach (var rune in value.EnumerateRunes())
         {
             var runeColumns = Math.Max(0, rune.GetColumns());
             if (prefixColumns + runeColumns > maxPrefixColumns)
@@ -3233,7 +3417,7 @@ internal sealed class FileManagerWindow : Window
             prefixLength += rune.Utf16SequenceLength;
         }
 
-        return path[..prefixLength] + ellipsis;
+        return value[..prefixLength] + ellipsis;
     }
 
     private enum ConflictChoice { None, Replace, Duplicate }
