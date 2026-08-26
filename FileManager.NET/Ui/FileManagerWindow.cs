@@ -265,7 +265,7 @@ internal sealed class FileManagerWindow : Window
     private void BeginGitProbe(NavigationLocation location)
     {
         CancelGitProbe();
-        if (location.IsArchive)
+        if (location.IsArchive || !_gitRepositoryService.IsAvailable)
         {
             return;
         }

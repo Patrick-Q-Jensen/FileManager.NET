@@ -7,13 +7,29 @@ namespace FileManager.NET.Core.Git;
 internal sealed class GitRepositoryService : IGitRepositoryService
 {
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
-    private volatile bool _gitUnavailable;
+    private const int AvailabilityTimeoutMilliseconds = 2_000;
+
+    private readonly string _gitExecutable;
+    private volatile bool _gitAvailable;
+
+    public GitRepositoryService()
+        : this("git.exe")
+    {
+    }
+
+    internal GitRepositoryService(string gitExecutable)
+    {
+        _gitExecutable = gitExecutable;
+        _gitAvailable = CheckGitAvailability();
+    }
+
+    public bool IsAvailable => _gitAvailable;
 
     public async Task<GitRepositoryInfo?> DetectAsync(
         string directory,
         CancellationToken cancellationToken)
     {
-        if (_gitUnavailable || !Directory.Exists(directory))
+        if (!_gitAvailable || !Directory.Exists(directory))
         {
             return null;
         }
@@ -81,8 +97,10 @@ internal sealed class GitRepositoryService : IGitRepositoryService
         }
         catch (Win32Exception ex)
         {
-            _gitUnavailable = true;
-            Log.Warning(ex, "Git executable is unavailable; repository detection is disabled");
+            _gitAvailable = false;
+            Log.Information(
+                "Git executable became unavailable; repository detection is disabled: {Message}",
+                ex.Message);
             return null;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -101,7 +119,7 @@ internal sealed class GitRepositoryService : IGitRepositoryService
         }
     }
 
-    private static async Task<string> GetTrackedRemoteNameAsync(
+    private async Task<string> GetTrackedRemoteNameAsync(
         string directory,
         string branch,
         bool detached,
@@ -129,7 +147,7 @@ internal sealed class GitRepositoryService : IGitRepositoryService
         return "origin";
     }
 
-    private static async Task<string?> GetRemoteUrlAsync(
+    private async Task<string?> GetRemoteUrlAsync(
         string directory,
         string remoteName,
         CancellationToken cancellationToken)
@@ -271,7 +289,60 @@ internal sealed class GitRepositoryService : IGitRepositoryService
         return remote.IndexOf(':');
     }
 
-    private static async Task<GitCommandResult> RunGitAsync(
+    private bool CheckGitAvailability()
+    {
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = _gitExecutable,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                },
+            };
+            process.StartInfo.ArgumentList.Add("--version");
+
+            if (!process.Start())
+            {
+                Log.Information("Git could not be started; repository detection is disabled");
+                return false;
+            }
+
+            if (!process.WaitForExit(AvailabilityTimeoutMilliseconds))
+            {
+                TryKillProcess(process);
+                Log.Warning("Git availability check timed out; repository detection is disabled");
+                return false;
+            }
+
+            if (process.ExitCode != 0)
+            {
+                Log.Information(
+                    "Git availability check returned exit code {ExitCode}; repository detection is disabled",
+                    process.ExitCode);
+                return false;
+            }
+
+            Log.Debug("Git repository detection is available");
+            return true;
+        }
+        catch (Win32Exception)
+        {
+            Log.Information("Git is not installed or not on PATH; repository detection is disabled");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Git availability check failed; repository detection is disabled");
+            return false;
+        }
+    }
+
+    private async Task<GitCommandResult> RunGitAsync(
         string directory,
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
@@ -279,7 +350,7 @@ internal sealed class GitRepositoryService : IGitRepositoryService
         cancellationToken.ThrowIfCancellationRequested();
         var startInfo = new ProcessStartInfo
         {
-            FileName = "git.exe",
+            FileName = _gitExecutable,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
@@ -308,18 +379,22 @@ internal sealed class GitRepositoryService : IGitRepositoryService
         }
         catch (OperationCanceledException)
         {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch (Exception ex) when (ex is InvalidOperationException
-                                       or Win32Exception
-                                       or NotSupportedException)
-            {
-                Log.Debug(ex, "Git process exited before cancellation cleanup");
-            }
-
+            TryKillProcess(process);
             throw;
+        }
+    }
+
+    private static void TryKillProcess(Process process)
+    {
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+                                   or Win32Exception
+                                   or NotSupportedException)
+        {
+            Log.Debug(ex, "Git process exited before cancellation cleanup");
         }
     }
 
