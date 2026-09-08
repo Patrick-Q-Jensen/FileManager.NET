@@ -91,6 +91,19 @@ internal sealed class FileManagerTabs : Window
     /// </summary>
     protected override bool OnKeyDown(Key key)
     {
+        if (key.KeyCode == KeyCode.Esc)
+        {
+            // Tabs can retain focus after their header is selected. Consume Esc here instead of
+            // letting Window's default quit command stop the root application.
+            if (_tabs.Value is FileManagerWindow pane)
+            {
+                pane.HandleEscape();
+            }
+
+            key.Handled = true;
+            return true;
+        }
+
         if (key.IsCtrl)
         {
             var baseKey = key.KeyCode & ~(KeyCode.CtrlMask | KeyCode.AltMask);

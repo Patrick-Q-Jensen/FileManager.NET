@@ -443,13 +443,7 @@ internal sealed class FileManagerWindow : Window
                 return;
 
             case KeyCode.Esc:
-                // Esc breaks out of filtering mode without exiting the application. This keeps
-                // deleting the filter from ever moving up a directory.
-                if (_controller.Query.Length > 0)
-                {
-                    _controller.ClearQuery();
-                }
-
+                HandleEscape();
                 key.Handled = true;
                 return;
 
@@ -463,6 +457,18 @@ internal sealed class FileManagerWindow : Window
 
                 return;
         }
+    }
+
+    internal void HandleEscape()
+    {
+        // Esc breaks out of filtering mode without exiting the application. This keeps deleting
+        // the filter from ever moving up a directory.
+        if (_controller.Query.Length > 0)
+        {
+            _controller.ClearQuery();
+        }
+
+        _listView.SetFocus();
     }
 
     /// <summary>
