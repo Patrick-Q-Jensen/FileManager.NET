@@ -6,12 +6,14 @@ namespace FileManager.NET.Core.Undo;
 internal sealed record UndoResult(bool Success, string Message)
 {
     public IReadOnlyList<string> RemovedPaths { get; init; } = [];
+    public IReadOnlyList<string> RestoredPaths { get; init; } = [];
     public string? MovedFromPath { get; init; }
     public string? MovedToPath { get; init; }
+    public bool IsComplete { get; init; }
 }
 
 /// <summary>Keeps a bounded history of file operations completed during this process.</summary>
-internal sealed class UndoHistory
+internal sealed class UndoHistory : IDisposable
 {
     private const int MaxEntries = 100;
     private const int MaxTrackedPaths = 20_000;
@@ -97,12 +99,48 @@ internal sealed class UndoHistory
             files.Length + directories.Length));
     }
 
+    public void RecordDelete(
+        IRecycleService recycleService,
+        RecycleResult result,
+        int permanentlyDeleted)
+    {
+        if (result.RecycledItems.Count > MaxTrackedPaths)
+        {
+            recycleService.Release(result.RecycledItems);
+            RecordUnavailable(
+                "The last delete is too large for session undo; its items remain available in the Windows Recycle Bin.");
+            return;
+        }
+
+        if (result.RecycledItems.Count == 0)
+        {
+            if (permanentlyDeleted > 0)
+            {
+                RecordUnavailable(
+                    "The last delete cannot be undone because its items were permanently deleted.");
+            }
+
+            return;
+        }
+
+        var operation = new RecycledItemsUndo(
+            recycleService,
+            result.RecycledItems,
+            permanentlyDeleted);
+        Add(
+            new UndoEntry(
+                "delete",
+                operation.Execute,
+                result.RecycledItems.Count,
+                operation.Discard),
+            clearExisting: permanentlyDeleted > 0);
+    }
+
     public void RecordUnavailable(string message)
     {
         lock (_syncRoot)
         {
-            _entries.Clear();
-            _trackedPaths = 0;
+            ClearEntries();
             _entries.Add(new UndoEntry(message, null, 0));
         }
     }
@@ -150,7 +188,7 @@ internal sealed class UndoHistory
             }
         }
 
-        if (result.Success)
+        if (result.Success || result.IsComplete)
         {
             lock (_syncRoot)
             {
@@ -158,6 +196,7 @@ internal sealed class UndoHistory
                 {
                     _entries.RemoveAt(_entries.Count - 1);
                     _trackedPaths -= entry.TrackedPaths;
+                    DiscardEntry(entry);
                 }
             }
         }
@@ -165,20 +204,59 @@ internal sealed class UndoHistory
         return result;
     }
 
-    private void Add(UndoEntry entry)
+    public void Dispose()
     {
         lock (_syncRoot)
         {
+            ClearEntries();
+        }
+    }
+
+    private void Add(UndoEntry entry, bool clearExisting = false)
+    {
+        lock (_syncRoot)
+        {
+            if (clearExisting)
+            {
+                ClearEntries();
+            }
+
             while (_entries.Count > 0
                    && (_entries.Count == MaxEntries
                        || _trackedPaths + entry.TrackedPaths > MaxTrackedPaths))
             {
-                _trackedPaths -= _entries[0].TrackedPaths;
+                var discarded = _entries[0];
+                _trackedPaths -= discarded.TrackedPaths;
                 _entries.RemoveAt(0);
+                DiscardEntry(discarded);
             }
 
             _entries.Add(entry);
             _trackedPaths += entry.TrackedPaths;
+        }
+    }
+
+    private void ClearEntries()
+    {
+        foreach (var entry in _entries)
+        {
+            DiscardEntry(entry);
+        }
+
+        _entries.Clear();
+        _trackedPaths = 0;
+    }
+
+    private static void DiscardEntry(UndoEntry entry)
+    {
+        try
+        {
+            entry.Discard?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to release resources for discarded undo operation {Description}",
+                entry.Description);
         }
     }
 
@@ -353,6 +431,75 @@ internal sealed class UndoHistory
         }
     }
 
+    private sealed class RecycledItemsUndo(
+        IRecycleService recycleService,
+        IReadOnlyList<RecycledItemToken> items,
+        int permanentlyDeleted)
+    {
+        private readonly List<RecycledItemToken> _items = [.. items];
+
+        public UndoResult Execute()
+        {
+            var result = recycleService.RestoreAsync(_items.ToArray())
+                .GetAwaiter()
+                .GetResult();
+
+            var completedIds = result.RestoredItems
+                .Select(item => item.Id)
+                .Concat(result.Failures
+                    .Where(failure => !failure.Retryable)
+                    .Select(failure => failure.Item.Id))
+                .ToHashSet();
+            _items.RemoveAll(item => completedIds.Contains(item.Id));
+
+            var retryableFailures = result.Failures.Count(failure => failure.Retryable);
+            var terminalFailures = result.Failures.Count - retryableFailures;
+            var complete = _items.Count == 0;
+
+            string message;
+            if (retryableFailures > 0)
+            {
+                message = result.RestoredItems.Count == 0
+                    ? $"Undo blocked: {result.Failures.First(failure => failure.Retryable).Error}"
+                    : $"Restored {result.RestoredItems.Count} items; {retryableFailures} could not be restored.";
+            }
+            else if (terminalFailures > 0)
+            {
+                var terminalError = result.Failures.First(failure => !failure.Retryable).Error;
+                message = result.RestoredItems.Count == 0
+                    ? $"Undo incomplete: {terminalError}"
+                    : $"Restored {result.RestoredItems.Count} items; {terminalError}";
+            }
+            else if (permanentlyDeleted > 0)
+            {
+                message = $"Restored {result.RestoredItems.Count} items; {permanentlyDeleted} permanently deleted items cannot be restored.";
+            }
+            else
+            {
+                message = result.RestoredItems.Count == 1
+                    ? $"Restored: {Path.GetFileName(result.RestoredItems[0].OriginalPath)}"
+                    : $"Restored {result.RestoredItems.Count} items.";
+            }
+
+            return new UndoResult(
+                complete && terminalFailures == 0,
+                message)
+            {
+                RestoredPaths = result.ChangedPaths,
+                IsComplete = complete,
+            };
+        }
+
+        public void Discard()
+        {
+            if (_items.Count > 0)
+            {
+                recycleService.Release(_items.ToArray());
+                _items.Clear();
+            }
+        }
+    }
+
     private static bool IsExpectedFileSystemException(Exception ex) =>
         ex is IOException
             or UnauthorizedAccessException
@@ -362,7 +509,8 @@ internal sealed class UndoHistory
     private sealed record UndoEntry(
         string Description,
         Func<UndoResult>? Action,
-        int TrackedPaths);
+        int TrackedPaths,
+        Action? Discard = null);
 
     private sealed class UndoBlockedException(string message) : Exception(message);
 }

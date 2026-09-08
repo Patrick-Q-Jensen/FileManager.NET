@@ -57,6 +57,7 @@ internal sealed class FileManagerWindow : Window
     private readonly ZipArchiveService _zipArchiveService;
     private readonly UndoHistory _undoHistory;
     private readonly IGitRepositoryService _gitRepositoryService;
+    private readonly IRecycleService _recycleService;
     private readonly Label _filterLabel;
     private readonly FilterListView _listView;
     private readonly Label _statusLabel;
@@ -113,7 +114,8 @@ internal sealed class FileManagerWindow : Window
         IFileLauncher fileLauncher,
         ZipArchiveService zipArchiveService,
         UndoHistory undoHistory,
-        IGitRepositoryService gitRepositoryService)
+        IGitRepositoryService gitRepositoryService,
+        IRecycleService recycleService)
     {
         _app = app;
         _controller = controller;
@@ -124,6 +126,7 @@ internal sealed class FileManagerWindow : Window
         _zipArchiveService = zipArchiveService;
         _undoHistory = undoHistory;
         _gitRepositoryService = gitRepositoryService;
+        _recycleService = recycleService;
 
         _filterLabel = new Label
         {
@@ -1794,7 +1797,9 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        if (result.RemovedPaths.Count > 0 || result.MovedFromPath is not null)
+        if (result.RemovedPaths.Count > 0
+            || result.RestoredPaths.Count > 0
+            || result.MovedFromPath is not null)
         {
             RefreshAfterUndo(result);
         }
@@ -2334,8 +2339,8 @@ internal sealed class FileManagerWindow : Window
             Y = 1,
             Width = Dim.Fill(1),
             Text = entries.Count == 1
-                ? $"Delete \"{entries[0].Name}\"? Press Enter to confirm."
-                : $"Are you sure you want to delete all {entries.Count} selected items? Press Enter to confirm.",
+                ? $"Move \"{entries[0].Name}\" to the Recycle Bin? Press Enter to confirm."
+                : $"Move all {entries.Count} selected items to the Recycle Bin? Press Enter to confirm.",
         };
 
         var dialog = new Dialog
@@ -2390,19 +2395,143 @@ internal sealed class FileManagerWindow : Window
             return;
         }
 
-        var deleted = 0;
-        var deletedEntries = new List<FileSystemEntry>(entries.Count);
-        string? firstFailure = null;
-        var failed = 0;
+        var recycleResult = RunBackgroundOperation(
+            "Moving to Recycle Bin",
+            "Moving selected items to the Windows Recycle Bin…",
+            () => _recycleService.RecycleAsync(entries).GetAwaiter().GetResult(),
+            out var recycleFailure);
+        if (recycleResult is null)
+        {
+            _controller.SetStatus($"Delete failed: {recycleFailure ?? "The Recycle Bin operation failed."}");
+            return;
+        }
 
+        var entryByPath = entries.ToDictionary(
+            entry => entry.FullPath,
+            StringComparer.OrdinalIgnoreCase);
+        var permanentCandidates = recycleResult.Failures
+            .Where(failure =>
+                entryByPath.ContainsKey(failure.Path)
+                && (File.Exists(failure.Path) || Directory.Exists(failure.Path)))
+            .Select(failure => entryByPath[failure.Path])
+            .ToArray();
+
+        PermanentDeleteResult? permanentResult = null;
+        if (permanentCandidates.Length > 0
+            && ShowPermanentDeleteConfirmDialog(permanentCandidates.Length))
+        {
+            permanentResult = RunBackgroundOperation(
+                "Deleting Permanently",
+                "Permanently deleting items that could not be recycled…",
+                () => DeletePermanently(permanentCandidates),
+                out var permanentFailure);
+            if (permanentResult is null)
+            {
+                permanentResult = new PermanentDeleteResult(
+                    [],
+                    [permanentFailure ?? "The permanent delete operation failed."]);
+            }
+        }
+
+        var removedPaths = new HashSet<string>(
+            recycleResult.RecycledItems.Select(item => item.OriginalPath),
+            StringComparer.OrdinalIgnoreCase);
+        removedPaths.UnionWith(recycleResult.UnrecoverablePaths);
+        if (permanentResult is not null)
+        {
+            removedPaths.UnionWith(permanentResult.DeletedEntries.Select(entry => entry.FullPath));
+        }
+
+        var permanentlyDeleted = recycleResult.UnrecoverablePaths.Count
+                                 + (permanentResult?.DeletedEntries.Count ?? 0);
+        if (recycleResult.RecycledItems.Count > 0 || permanentlyDeleted > 0)
+        {
+            _undoHistory.RecordDelete(
+                _recycleService,
+                recycleResult,
+                permanentlyDeleted);
+        }
+
+        if (removedPaths.Count > 0)
+        {
+            var removedEntries = entries
+                .Where(entry => removedPaths.Contains(entry.FullPath))
+                .ToArray();
+            RefreshAfterMutation(
+                () => _controller.RemoveFlattenedEntries(removedEntries),
+                () => _controller.EnterDirectory(_controller.CurrentDirectory));
+        }
+
+        var unresolvedRecycleFailures = recycleResult.Failures.Count
+                                        - (permanentResult is null ? 0 : permanentCandidates.Length);
+        var failed = unresolvedRecycleFailures + (permanentResult?.Errors.Count ?? 0);
+        var recycled = recycleResult.RecycledItems.Count;
+        var removed = removedPaths.Count;
+        if (removed == 0)
+        {
+            var error = permanentResult?.Errors.FirstOrDefault()
+                        ?? recycleResult.Failures.FirstOrDefault()?.Error
+                        ?? "No items were deleted.";
+            _controller.SetStatus($"Delete failed: {error}");
+        }
+        else if (failed == 0 && permanentlyDeleted == 0)
+        {
+            _controller.SetStatus(recycled == 1
+                ? $"Moved to Recycle Bin: {Path.GetFileName(recycleResult.RecycledItems[0].OriginalPath)}"
+                : $"Moved {recycled} items to the Recycle Bin");
+        }
+        else
+        {
+            _controller.SetStatus(
+                $"Deleted {removed} items ({recycled} recyclable, {permanentlyDeleted} permanent); {failed} not deleted.");
+        }
+    }
+
+    private bool ShowPermanentDeleteConfirmDialog(int itemCount)
+    {
+        var confirmed = false;
+        var label = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = itemCount == 1
+                ? "1 item could not be moved to the Recycle Bin. Permanently delete it? This cannot be undone."
+                : $"{itemCount} items could not be moved to the Recycle Bin. Permanently delete them? This cannot be undone.",
+        };
+
+        var dialog = new Dialog
+        {
+            Title = "Confirm Permanent Delete",
+            Width = Dim.Percent(70),
+            Height = 7,
+        };
+        dialog.KeyDown += (_, key) =>
+        {
+            if (key.KeyCode == KeyCode.Enter)
+            {
+                confirmed = true;
+                key.Handled = true;
+                _app.RequestStop();
+            }
+        };
+        dialog.Add(label);
+        RunDialog(dialog);
+        return confirmed;
+    }
+
+    private static PermanentDeleteResult DeletePermanently(
+        IReadOnlyList<FileSystemEntry> entries)
+    {
+        var deleted = new List<FileSystemEntry>(entries.Count);
+        var errors = new List<string>();
         foreach (var entry in entries)
         {
             var skipReason = GetDeleteBlockReason(entry);
             if (skipReason is not null)
             {
-                failed++;
-                firstFailure ??= $"{entry.Name}: {skipReason}";
-                Log.Warning("Skipped delete of {Path}: {Reason}", entry.FullPath, skipReason);
+                errors.Add($"{entry.Name}: {skipReason}");
+                Log.Warning("Skipped permanent delete of {Path}: {Reason}", entry.FullPath, skipReason);
                 continue;
             }
 
@@ -2417,35 +2546,21 @@ internal sealed class FileManagerWindow : Window
                     File.Delete(entry.FullPath);
                 }
 
-                deleted++;
-                deletedEntries.Add(entry);
+                deleted.Add(entry);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                failed++;
-                firstFailure ??= $"{entry.Name}: {ex.Message}";
-                Log.Warning(ex, "Failed to delete {Path}", entry.FullPath);
+                errors.Add($"{entry.Name}: {ex.Message}");
+                Log.Warning(ex, "Failed to permanently delete {Path}", entry.FullPath);
             }
             catch (Exception ex)
             {
-                failed++;
-                firstFailure ??= $"{entry.Name}: {ex.Message}";
-                Log.Error(ex, "Unexpected failure deleting {Path}", entry.FullPath);
+                errors.Add($"{entry.Name}: {ex.Message}");
+                Log.Error(ex, "Unexpected failure permanently deleting {Path}", entry.FullPath);
             }
         }
 
-        if (deleted > 0)
-        {
-            _undoHistory.RecordUnavailable(
-                "The last delete cannot be undone because deleted data is not retained.");
-            RefreshAfterMutation(
-                () => _controller.RemoveFlattenedEntries(deletedEntries),
-                () => _controller.EnterDirectory(_controller.CurrentDirectory));
-        }
-
-        _controller.SetStatus(failed == 0
-            ? deleted == 1 ? $"Deleted: {entries[0].Name}" : $"Deleted {deleted} items"
-            : $"Deleted {deleted}, skipped {failed} — {firstFailure}");
+        return new PermanentDeleteResult(deleted, errors);
     }
 
     // Cheap pre-check so obvious blockers are reported without attempting a partial delete.
@@ -3001,7 +3116,7 @@ internal sealed class FileManagerWindow : Window
             "  \u2192               Drill into directory or ZIP archive",
             "  \u2190               Go to parent directory",
             "  Enter           Open file, directory, or ZIP archive",
-            "  Del             Delete selected / marked items",
+            "  Del             Move selected / marked items to Recycle Bin",
             "  Backspace       Edit the active filter",
             "  Esc             Clear filter  /  quit",
             "  F1 \u2013 F9         Switch to tab 1 \u2013 9",
@@ -3421,6 +3536,10 @@ internal sealed class FileManagerWindow : Window
     }
 
     private enum ConflictChoice { None, Replace, Duplicate }
+
+    private sealed record PermanentDeleteResult(
+        IReadOnlyList<FileSystemEntry> DeletedEntries,
+        IReadOnlyList<string> Errors);
 
     private sealed class FlattenOperation
     {

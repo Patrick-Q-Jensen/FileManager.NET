@@ -33,6 +33,7 @@ internal sealed class FileManagerTabs : Window
     private readonly IEntryFilter _entryFilter;
     private readonly IGitRepositoryService _gitRepositoryService;
     private readonly IFileLauncher _fileLauncher;
+    private readonly IRecycleService _recycleService;
     private readonly IFavoritesService _favoritesService;
     private readonly ISortSettingsService _sortSettingsService;
     private readonly ZipArchiveService _zipArchiveService;
@@ -49,6 +50,7 @@ internal sealed class FileManagerTabs : Window
         IEntryFilter entryFilter,
         IGitRepositoryService gitRepositoryService,
         IFileLauncher fileLauncher,
+        IRecycleService recycleService,
         IFavoritesService favoritesService,
         ISortSettingsService sortSettingsService,
         string startDirectory,
@@ -59,6 +61,7 @@ internal sealed class FileManagerTabs : Window
         _entryFilter = entryFilter;
         _gitRepositoryService = gitRepositoryService;
         _fileLauncher = fileLauncher;
+        _recycleService = recycleService;
         _favoritesService = favoritesService;
         _sortSettingsService = sortSettingsService;
         _zipArchiveService = new ZipArchiveService();
@@ -163,7 +166,8 @@ internal sealed class FileManagerTabs : Window
             _fileLauncher,
             _zipArchiveService,
             _undoHistory,
-            _gitRepositoryService);
+            _gitRepositoryService,
+            _recycleService);
 
         // When any tab changes directory its header title changes width, so refresh the whole tab
         // strip to keep all headers reflowed and non-overlapping.
@@ -186,6 +190,16 @@ internal sealed class FileManagerTabs : Window
         // pump cycle after Add().
         _app.Invoke(() => _app.Invoke(ApplyTabTitleWidths));
         return pane;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _undoHistory.Dispose();
+        }
+
+        base.Dispose(disposing);
     }
 
     private void RestoreTabs(SessionState sessionState, string startDirectory)

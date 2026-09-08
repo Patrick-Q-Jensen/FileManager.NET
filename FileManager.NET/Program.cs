@@ -39,6 +39,7 @@ namespace FileManager.NET
                 IEntryFilter filter = new SubstringEntryFilter();
                 IGitRepositoryService gitRepositoryService = new GitRepositoryService();
                 IFileLauncher launcher = new WindowsFileLauncher();
+                using IRecycleService recycleService = new WindowsFileRecycleService();
 
                 // Start loading favorites from disk in the background so it never delays startup.
                 IFavoritesService favorites = new FavoritesService();
@@ -61,6 +62,7 @@ namespace FileManager.NET
                     filter,
                     gitRepositoryService,
                     launcher,
+                    recycleService,
                     favorites,
                     sortSettings,
                     startDirectory,
