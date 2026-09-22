@@ -16,9 +16,10 @@ namespace FileManager.NET.Ui;
 internal static class EntryRowFormatter
 {
     // Floor/ceiling for the adaptive name column so a directory with only short names doesn't
-    // collapse the column, and a single absurdly long name doesn't push size/date off-screen.
+    // collapse the column, while unusually long names remain visible without allowing an
+    // unbounded row width.
     private const int MinNameColumnWidth = 20;
-    private const int MaxNameColumnWidth = 80;
+    private const int MaxNameColumnWidth = 160;
 
     private const int DateColumnWidth = 16;
     private const int SizeNumberColumnWidth = 6;

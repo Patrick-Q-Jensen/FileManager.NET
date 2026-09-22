@@ -86,6 +86,10 @@ When adding a command:
 - Restores selection by entry identity when requested.
 - Updates the query, status, title, Git context, and tab-header layout.
 
+`EntryRowFormatter` sizes the name column to the widest visible entry, with a 20-character minimum
+and a 160-character ceiling. Longer names are ellipsized to keep row allocation and horizontal
+overflow bounded; date and size columns remain fixed-width.
+
 Prefer a controller mutation followed by its existing `Changed` event. Do not mutate list content in
 parallel with controller state.
 
