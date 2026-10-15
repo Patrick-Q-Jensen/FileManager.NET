@@ -954,6 +954,7 @@ internal sealed class FileManagerWindow : Window
         }
 
         IReadOnlyList<string> paths;
+        IReadOnlyList<string> extractionErrors = [];
         if (entries[0].IsArchiveEntry)
         {
             var extraction = RunBackgroundOperation(
@@ -975,15 +976,25 @@ internal sealed class FileManagerWindow : Window
             }
 
             paths = extraction.Paths;
+            extractionErrors = extraction.Errors;
         }
         else
         {
             paths = entries.Select(e => e.FullPath).ToArray();
         }
 
-        _controller.SetStatus(WindowsFileClipboard.TrySetFiles(paths)
-            ? entries.Count == 1 ? $"Copied: {entries[0].Name}" : $"Copied {entries.Count} items"
-            : "Clipboard is not available.");
+        if (!WindowsFileClipboard.TrySetFiles(paths, out var clipboardError))
+        {
+            _controller.SetStatus($"Copy failed: {clipboardError}");
+            return;
+        }
+
+        var summary = paths.Count == 1 && extractionErrors.Count == 0
+            ? $"Copied: {entries[0].Name}"
+            : $"Copied {paths.Count} items";
+        _controller.SetStatus(extractionErrors.Count == 0
+            ? summary
+            : $"{summary}; {extractionErrors.Count:N0} skipped — {extractionErrors[0]}");
     }
 
     private void ActivateSelectedEntry()
@@ -1288,9 +1299,17 @@ internal sealed class FileManagerWindow : Window
 
     private void PasteFromClipboard()
     {
-        if (!WindowsFileClipboard.TryGetFiles(out var sources))
+        if (!WindowsFileClipboard.TryGetFiles(out var sources, out var clipboardError))
         {
-            PasteVirtualFilesFromClipboard();
+            if (clipboardError is not null)
+            {
+                _controller.SetStatus($"Paste failed: {clipboardError}");
+            }
+            else
+            {
+                PasteVirtualFilesFromClipboard();
+            }
+
             return;
         }
 

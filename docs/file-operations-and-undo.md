@@ -44,6 +44,13 @@ Physical clipboard paths use Windows `CF_HDROP`. Virtual clipboard items, such a
 from another application, are described through `FileGroupDescriptorW` and materialized from
 `FileContents` streams into a temporary staging directory.
 
+Copying entries from a ZIP first extracts the selection off the UI thread, then publishes the
+successful physical paths through `CF_HDROP`. The extraction files must remain available for later
+pastes, including into other applications; the existing ZIP extraction cleanup removes directories
+older than seven days at service startup. Partial extraction copies only successful items and reports
+the skipped count and first error. Clipboard access failures are reported as failures, not as an
+empty clipboard.
+
 `DirectoryService.PasteAsync`:
 
 - Builds a copy plan before execution.

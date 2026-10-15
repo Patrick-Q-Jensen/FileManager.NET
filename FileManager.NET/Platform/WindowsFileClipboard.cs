@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
@@ -62,14 +63,23 @@ internal static class WindowsFileClipboard
     [DllImport("user32.dll")]
     private static extern bool CloseClipboard();
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EmptyClipboard();
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr GetClipboardData(uint uFormat);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowEx(
+        uint exStyle, string className, string? windowName, uint style,
+        int x, int y, int width, int height,
+        IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyWindow(IntPtr window);
 
     [DllImport("user32.dll")]
     private static extern bool IsClipboardFormatAvailable(uint format);
@@ -83,7 +93,7 @@ internal static class WindowsFileClipboard
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GlobalAlloc(uint uFlags, nuint dwBytes);
 
-    [DllImport("kernel32.dll")]
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GlobalLock(IntPtr hMem);
 
     [DllImport("kernel32.dll")]
@@ -114,98 +124,122 @@ internal static class WindowsFileClipboard
     /// Puts the given file-system paths into the clipboard as a CF_HDROP file drop list so
     /// that receiving applications (Explorer, etc.) can paste them. Returns <c>true</c> on success.
     /// </summary>
-    public static bool TrySetFiles(IReadOnlyList<string> paths)
+    public static bool TrySetFiles(IReadOnlyList<string> paths, out string? error)
     {
         if (paths.Count == 0)
+        {
+            error = "No files selected for the clipboard.";
             return false;
+        }
 
-        return RunOnSta(() => TrySetFilesCore(paths));
+        string? capturedError = null;
+        var success = RunOnSta(() => TrySetFilesCore(paths, out capturedError));
+        error = capturedError;
+        return success;
     }
 
-    private static bool TrySetFilesCore(IReadOnlyList<string> paths)
+    private static bool TrySetFilesCore(IReadOnlyList<string> paths, out string? error)
     {
+        error = null;
         var fileList = BuildFileListChars(paths);
         int headerSize = Marshal.SizeOf<DROPFILES>();
         nuint totalBytes = (nuint)(headerSize + fileList.Length * sizeof(char));
 
         var hGlobal = GlobalAlloc(GMEM_MOVEABLE, totalBytes);
         if (hGlobal == IntPtr.Zero)
-            return false;
+            return ReportClipboardFailure("memory allocation", out error);
 
-        var ptr = GlobalLock(hGlobal);
-        if (ptr == IntPtr.Zero)
-        {
-            GlobalFree(hGlobal);
-            return false;
-        }
-
-        Marshal.StructureToPtr(
-            new DROPFILES { pFiles = (uint)headerSize, fWide = 1 },
-            ptr,
-            fDeleteOld: false);
-
-        Marshal.Copy(fileList, 0, IntPtr.Add(ptr, headerSize), fileList.Length);
-
-        GlobalUnlock(hGlobal);
-
-        if (!OpenClipboard(IntPtr.Zero))
-        {
-            GlobalFree(hGlobal);
-            return false;
-        }
-
-        bool success;
+        IntPtr owner = IntPtr.Zero;
+        bool clipboardOpen = false;
         try
         {
-            EmptyClipboard();
+            var ptr = GlobalLock(hGlobal);
+            if (ptr == IntPtr.Zero)
+                return ReportClipboardFailure("memory lock", out error);
+
+            try
+            {
+                Marshal.StructureToPtr(
+                    new DROPFILES { pFiles = (uint)headerSize, fWide = 1 },
+                    ptr,
+                    fDeleteOld: false);
+                Marshal.Copy(fileList, 0, IntPtr.Add(ptr, headerSize), fileList.Length);
+            }
+            finally
+            {
+                GlobalUnlock(hGlobal);
+            }
+
+            // EmptyClipboard requires a window owner for subsequent SetClipboardData calls.
+            // A message-only window belongs to this STA, independently of the terminal host.
+            owner = CreateWindowEx(
+                0, "STATIC", null, 0, 0, 0, 0, 0,
+                new IntPtr(-3), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (owner == IntPtr.Zero)
+                return ReportClipboardFailure("owner window creation", out error);
+
+            if (!OpenClipboard(owner))
+                return ReportClipboardFailure("open", out error);
+
+            clipboardOpen = true;
+            if (!EmptyClipboard())
+                return ReportClipboardFailure("clear", out error);
+
+            if (SetClipboardData(CF_HDROP, hGlobal) == IntPtr.Zero)
+                return ReportClipboardFailure("write", out error);
+
             // On success Windows takes ownership of hGlobal; do not free it.
-            success = SetClipboardData(CF_HDROP, hGlobal) != IntPtr.Zero;
+            hGlobal = IntPtr.Zero;
+            return true;
         }
         finally
         {
-            CloseClipboard();
+            if (clipboardOpen)
+                CloseClipboard();
+            if (owner != IntPtr.Zero && !DestroyWindow(owner))
+                ReportClipboardFailure("owner window cleanup", out _);
+            if (hGlobal != IntPtr.Zero)
+                GlobalFree(hGlobal);
         }
-
-        if (!success)
-            GlobalFree(hGlobal);
-
-        return success;
     }
 
     /// <summary>
     /// Reads file-system paths from the clipboard CF_HDROP format. Returns <c>true</c> when at
     /// least one path was found; <paramref name="paths"/> is always set (empty on failure).
-    /// Returns <c>false</c> when the clipboard holds non-file data such as plain text, so callers
-    /// can safely distinguish "clipboard has files" from "clipboard has something else".
+    /// On failure, <paramref name="error"/> distinguishes an unavailable or unreadable clipboard
+    /// from one that holds no files, such as plain text.
     /// </summary>
-    public static bool TryGetFiles(out IReadOnlyList<string> paths)
+    public static bool TryGetFiles(out IReadOnlyList<string> paths, out string? error)
     {
         IReadOnlyList<string> captured = [];
+        string? capturedError = null;
         bool found = RunOnSta(() =>
         {
-            bool ok = TryGetFilesCore(out var list);
+            bool ok = TryGetFilesCore(out var list, out capturedError);
             captured = list;
             return ok;
         });
         paths = captured;
+        error = capturedError;
         return found;
     }
 
-    private static bool TryGetFilesCore(out IReadOnlyList<string> paths)
+    private static bool TryGetFilesCore(out IReadOnlyList<string> paths, out string? error)
     {
         paths = [];
+        error = null;
 
         if (!IsClipboardFormatAvailable(CF_HDROP))
             return false;
 
         if (!OpenClipboard(IntPtr.Zero))
-            return false;
+            return ReportClipboardFailure("open", out error);
 
         try
         {
             var hDrop = GetClipboardData(CF_HDROP);
             if (hDrop == IntPtr.Zero)
-                return false;
+                return ReportClipboardFailure("read", out error);
 
             uint count = DragQueryFile(hDrop, 0xFFFFFFFF, null, 0);
             if (count == 0)
@@ -216,8 +250,14 @@ internal static class WindowsFileClipboard
             for (uint i = 0; i < count; i++)
             {
                 uint len = DragQueryFile(hDrop, i, buffer, (uint)buffer.Length);
-                if (len > 0)
-                    result.Add(new string(buffer, 0, (int)len));
+                if (len == 0)
+                {
+                    error = "The clipboard file list contains an unreadable path.";
+                    Log.Warning("Clipboard file list contains an unreadable path");
+                    return false;
+                }
+
+                result.Add(new string(buffer, 0, (int)len));
             }
 
             paths = result;
@@ -227,6 +267,14 @@ internal static class WindowsFileClipboard
         {
             CloseClipboard();
         }
+    }
+
+    private static bool ReportClipboardFailure(string operation, out string? error)
+    {
+        var exception = new Win32Exception(Marshal.GetLastWin32Error());
+        error = $"Clipboard {operation} failed: {exception.Message}";
+        Log.Warning(exception, "Clipboard {Operation} failed", operation);
+        return false;
     }
 
     public static bool HasVirtualFiles() =>

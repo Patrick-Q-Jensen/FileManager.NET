@@ -85,6 +85,15 @@ The public service contract uses opaque GUID tokens so native pointers never esc
 
 Physical file copy uses `CF_HDROP`.
 
+The writer opens the clipboard with a message-only owner window created and destroyed on its
+dedicated STA. Opening with a null owner before `EmptyClipboard` does not satisfy the documented
+`SetClipboardData` ownership contract. File-list data is eagerly supplied, so it remains available
+after the owner window and worker thread exit.
+
+File-list reads distinguish absent file data from native access/read failures. Copy and paste report
+and log native failures instead of treating a busy or unreadable clipboard as empty. Only an absent
+physical file list falls back to virtual-file paste.
+
 Virtual file paste reads:
 
 - `FileGroupDescriptorW` for relative names, sizes, attributes, and timestamps
